@@ -1,13 +1,12 @@
 // report.js — Report generation, portfolio tracking, Telegram commands
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 
-const SYMBOLS = (process.env.SYMBOLS || 'BTCUSDT,ETHUSDT,SOLUSDT,AKTUSDT').split(',').map(s => s.trim());
+const SYMBOLS = (process.env.SYMBOLS || 'BTCUSDT,ETHUSDT,SOLUSDT').split(',').map(s => s.trim());
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const STARTING_CAPITAL = parseFloat(process.env.PORTFOLIO_VALUE_USD || '1000');
 const TIMEFRAME = process.env.TIMEFRAME || '5m';
 const MAX_TRADES = process.env.MAX_TRADES_PER_DAY || '100';
-const KUCOIN_SYMBOLS = ['AKTUSDT'];
 const STATE_FILE = 'portfolio.json';
 const REPORT_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
 
@@ -63,35 +62,35 @@ export function markReportSent() {
   saveState(state);
 }
 
-// ─── Market Data ──────────────────────────────────────────────────────────────
+// ─── Market Data (Coinbase Advanced Trade — no auth required) ─────────────────
+
+function toCbSymbol(s) {
+  if (s.endsWith('USDT')) return s.slice(0, -4) + '-USD';
+  if (s.endsWith('USD'))  return s.slice(0, -3) + '-USD';
+  return s;
+}
 
 async function fetch24hData() {
   const results = {};
-  const binanceSymbols = SYMBOLS.filter(s => !KUCOIN_SYMBOLS.includes(s));
-
-  await Promise.allSettled([
-    // Binance US (BTC, ETH, SOL)
-    ...binanceSymbols.map(s =>
-      fetch(`https://api.binance.us/api/v3/ticker/24hr?symbol=${s}`, { signal: AbortSignal.timeout(5000) })
-        .then(r => r.json())
-        .then(d => { results[s] = { price: parseFloat(d.lastPrice), change24h: parseFloat(d.priceChangePercent) }; })
-        .catch(() => {})
-    ),
-    // KuCoin (AKT)
-    ...KUCOIN_SYMBOLS.filter(s => SYMBOLS.includes(s)).map(s =>
-      fetch(`https://api.kucoin.com/api/v1/market/stats?symbol=${s.replace('USDT', '-USDT')}`, { signal: AbortSignal.timeout(5000) })
+  await Promise.allSettled(
+    SYMBOLS.map(s => {
+      const cbSym = toCbSymbol(s);
+      return fetch(
+        `https://api.coinbase.com/api/v3/brokerage/market/products/${cbSym}`,
+        { signal: AbortSignal.timeout(5000) }
+      )
         .then(r => r.json())
         .then(d => {
-          if (d.data) {
-            const last = parseFloat(d.data.last);
-            const open = parseFloat(d.data.open);
-            results[s] = { price: last, change24h: ((last - open) / open) * 100 };
+          if (d.price) {
+            results[s] = {
+              price:    parseFloat(d.price),
+              change24h: parseFloat(d.price_percentage_change_24h || 0),
+            };
           }
         })
-        .catch(() => {})
-    ),
-  ]);
-
+        .catch(() => {});
+    })
+  );
   return results;
 }
 
@@ -317,14 +316,17 @@ export async function checkTelegramCommands(log) {
     const cmd = raw.split('@')[0].toLowerCase(); // strip @botname suffix
 
     if (cmd === '/help') {
+      const mode = process.env.PAPER_TRADING !== 'false' ? '📋 Paper' : '🔴 Live';
       await tg(
-        `🤖 <b>Commands</b>\n\n` +
-        `/status — Mode, trade count, last run\n` +
-        `/portfolio — Cash, positions, P&amp;L\n` +
-        `/prices — Live prices for all assets\n` +
-        `/trades — Today's activity\n` +
-        `/report — Full report right now\n` +
-        `/pause — Pause trading\n` +
+        `🤖 <b>Claude Trading Bot</b>\n` +
+        `Mode: ${mode} | Assets: ${SYMBOLS.map(s => s.replace('USDT','')).join(', ')}\n\n` +
+        `<b>Commands</b>\n` +
+        `/status — Bot mode, trades today, last run\n` +
+        `/portfolio — Cash, open positions, P&amp;L\n` +
+        `/prices — Live prices + 24h change\n` +
+        `/trades — Today's trade activity\n` +
+        `/report — Full 4-hour report now\n` +
+        `/pause — Stop placing new trades\n` +
         `/resume — Resume trading\n` +
         `/help — This message`
       );
