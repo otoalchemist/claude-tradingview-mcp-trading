@@ -1,16 +1,12 @@
-// report.js — Report generation, portfolio tracking, Telegram commands
+// report.js — Portfolio tracking + 4-hour intelligence report
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 
-const SYMBOLS = (process.env.SYMBOLS || 'BTCUSDT,ETHUSDT,SOLUSDT').split(',').map(s => s.trim());
-const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const SYMBOLS          = (process.env.SYMBOLS || 'BTCUSDT,ETHUSDT,SOLUSDT').split(',').map(s => s.trim());
 const STARTING_CAPITAL = parseFloat(process.env.PORTFOLIO_VALUE_USD || '1000');
-const TIMEFRAME = process.env.TIMEFRAME || '5m';
-const MAX_TRADES = process.env.MAX_TRADES_PER_DAY || '100';
-const STATE_FILE = 'portfolio.json';
 const REPORT_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
+const STATE_FILE = 'portfolio.json';
 
-// ─── State (portfolio + bot flags) ───────────────────────────────────────────
+// ─── State (portfolio.json) ───────────────────────────────────────────────────
 
 function loadState() {
   const defaults = {
@@ -18,7 +14,6 @@ function loadState() {
     cash: STARTING_CAPITAL,
     positions: {},
     lastReportTime: 0,
-    lastUpdateId: 0,
     paused: false,
   };
   if (!existsSync(STATE_FILE)) return defaults;
@@ -32,19 +27,15 @@ function saveState(state) {
   writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
 }
 
-export function isPaused() {
-  return loadState().paused || false;
-}
-
 export function updatePortfolio(symbol, side, price, tradeSize) {
   const state = loadState();
   if (side === 'buy') {
     state.cash = Math.max(0, state.cash - tradeSize);
     if (!state.positions[symbol]) state.positions[symbol] = { quantity: 0, avgCost: 0, totalCost: 0 };
     const pos = state.positions[symbol];
-    pos.quantity += tradeSize / price;
+    pos.quantity  += tradeSize / price;
     pos.totalCost += tradeSize;
-    pos.avgCost = pos.totalCost / pos.quantity;
+    pos.avgCost    = pos.totalCost / pos.quantity;
   } else if (side === 'sell') {
     const pos = state.positions[symbol];
     if (pos) { state.cash += pos.quantity * price; delete state.positions[symbol]; }
@@ -62,7 +53,7 @@ export function markReportSent() {
   saveState(state);
 }
 
-// ─── Market Data (Coinbase Advanced Trade — no auth required) ─────────────────
+// ─── Market Data ──────────────────────────────────────────────────────────────
 
 function toCbSymbol(s) {
   if (s.endsWith('USDT')) return s.slice(0, -4) + '-USD';
@@ -70,348 +61,418 @@ function toCbSymbol(s) {
   return s;
 }
 
-async function fetch24hData() {
+async function fetchPrices() {
   const results = {};
   await Promise.allSettled(
-    SYMBOLS.map(s => {
-      const cbSym = toCbSymbol(s);
-      return fetch(
-        `https://api.coinbase.com/api/v3/brokerage/market/products/${cbSym}`,
-        { signal: AbortSignal.timeout(5000) }
-      )
+    SYMBOLS.map(s =>
+      fetch(`https://api.coinbase.com/api/v3/brokerage/market/products/${toCbSymbol(s)}`,
+        { signal: AbortSignal.timeout(5000) })
         .then(r => r.json())
         .then(d => {
-          if (d.price) {
-            results[s] = {
-              price:    parseFloat(d.price),
-              change24h: parseFloat(d.price_percentage_change_24h || 0),
-            };
-          }
+          if (d.price) results[s] = {
+            price:     parseFloat(d.price),
+            change24h: parseFloat(d.price_percentage_change_24h || 0),
+          };
         })
-        .catch(() => {});
-    })
+        .catch(() => {})
+    )
   );
   return results;
 }
 
-// ─── News ─────────────────────────────────────────────────────────────────────
+// ─── External Market Intelligence ─────────────────────────────────────────────
 
-async function fetchRSS(url, max = 5) {
+async function fetchFearGreed() {
   try {
-    const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(6000) });
+    const r = await fetch('https://api.alternative.me/fng/?limit=1', { signal: AbortSignal.timeout(5000) });
+    const d = await r.json();
+    const v = parseInt(d?.data?.[0]?.value || 0);
+    const label = d?.data?.[0]?.value_classification || '';
+    return { value: v, label };
+  } catch { return null; }
+}
+
+async function fetchGlobalMarket() {
+  try {
+    const r = await fetch('https://api.coingecko.com/api/v3/global', { signal: AbortSignal.timeout(6000) });
+    const d = await r.json();
+    const g = d?.data;
+    return {
+      btcDominance:   parseFloat(g?.market_cap_percentage?.btc || 0).toFixed(1),
+      totalMarketCap: g?.total_market_cap?.usd || 0,
+      marketCapChange24h: parseFloat(g?.market_cap_change_percentage_24h_usd || 0).toFixed(2),
+    };
+  } catch { return null; }
+}
+
+// Feed-level title patterns to skip (these are channel/source names, not articles)
+const FEED_TITLE_RE = /^(RSS|Feed|Cointelegraph|CoinDesk|Reuters|Yahoo|Bloomberg|CoinGecko|Decrypt|TheBlock|Bitcoin Magazine)/i;
+const FILLER_RE     = /^(here.?s what happened|today in crypto|daily (brief|roundup)|morning (brief|markets)|what happened in crypto|crypto today)/i;
+
+async function fetchRSS(url, max = 4) {
+  try {
+    const r = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; TradingBot/1.0)' },
+      signal: AbortSignal.timeout(6000),
+    });
     const xml = await r.text();
     const titles = [];
+    // Match <item> titles only (skip the top-level <channel><title>)
+    const itemsOnly = xml.split(/<item[\s>]/i).slice(1).join('<item>');
     const re = /<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/title>/gs;
+    const src = itemsOnly || xml; // fallback to full xml if no <item> found
     let m;
-    while ((m = re.exec(xml)) !== null && titles.length < max + 2) {
+    while ((m = re.exec(src)) !== null && titles.length < max + 4) {
       const t = m[1].trim()
         .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-        .replace(/&#039;/g, "'").replace(/&quot;/g, '"').replace(/<[^>]+>/g, '');
-      if (t.length > 15 && !/^(RSS|Feed|Cointelegraph|CoinDesk)$/i.test(t)) titles.push(t);
+        .replace(/&#039;/g, "'").replace(/&quot;/g, '"').replace(/<[^>]+>/g, '').trim();
+      if (
+        t.length > 20 &&
+        t.length < 200 &&
+        !FEED_TITLE_RE.test(t) &&
+        !FILLER_RE.test(t)
+      ) titles.push(t);
     }
     return titles.slice(0, max);
   } catch { return []; }
 }
 
-// ─── Session Stats ────────────────────────────────────────────────────────────
+// ─── Portfolio Snapshot (identical logic to telegram.js /portfolio) ───────────
+
+function buildPortfolioSnap(state, prices) {
+  let posValue = 0, unrealizedPnL = 0;
+  const posLines = [];
+
+  for (const [sym, pos] of Object.entries(state.positions || {})) {
+    // Use live price if available, fall back to avgCost (matches telegram.js behaviour)
+    const cp = prices[sym]?.price || pos.avgCost || 0;
+    const cv = pos.quantity * cp;
+    const pnl = cv - pos.totalCost;
+    posValue     += cv;
+    unrealizedPnL += pnl;
+    const arrow  = pnl >= 0 ? '▲' : '▼';
+    const pct    = pos.totalCost > 0 ? ((pnl / pos.totalCost) * 100).toFixed(1) : '0.0';
+    const liveTag = prices[sym] ? '' : ' (est.)';
+    posLines.push(
+      `  ${arrow} ${sym.replace('USDT','')}: $${pos.totalCost.toFixed(2)} → $${cv.toFixed(2)}${liveTag}` +
+      ` (${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} / ${pnl >= 0 ? '+' : ''}${pct}%)`
+    );
+  }
+
+  const total  = (state.cash || 0) + posValue;
+  const net    = total - (state.startingCapital || STARTING_CAPITAL);
+  const netPct = ((net / (state.startingCapital || STARTING_CAPITAL)) * 100).toFixed(1);
+
+  return { posValue, unrealizedPnL, total, net, netPct, posLines };
+}
+
+// ─── Session Stats ─────────────────────────────────────────────────────────────
 
 function getSessionStats(log, hoursBack = 4) {
-  const cutoff = Date.now() - hoursBack * 60 * 60 * 1000;
-  const recent = log.trades.filter(t => new Date(t.timestamp).getTime() > cutoff);
-
-  const scans = recent.length;
-  const executed = recent.filter(t => t.orderPlaced).length;
-  const blocked = recent.filter(t => !t.orderPlaced).length;
-
-  const nearMisses = recent
-    .filter(t => !t.orderPlaced && Array.isArray(t.conditions))
-    .filter(t => t.conditions.filter(c => !c.pass).length === 1)
-    .map(t => ({ symbol: t.symbol, cond: t.conditions.find(c => !c.pass)?.label || '?' }));
+  const cutoff  = Date.now() - hoursBack * 60 * 60 * 1000;
+  const recent  = log.trades.filter(t => new Date(t.timestamp).getTime() > cutoff);
+  const executed = recent.filter(t => t.orderPlaced);
+  const blocked  = recent.filter(t => !t.orderPlaced);
 
   const blockerCounts = {};
-  recent.filter(t => !t.orderPlaced && Array.isArray(t.conditions)).forEach(t => {
-    t.conditions.filter(c => !c.pass).forEach(c => {
+  blocked.forEach(t => {
+    (t.conditions || []).filter(c => !c.pass).forEach(c => {
       blockerCounts[c.label] = (blockerCounts[c.label] || 0) + 1;
     });
   });
-  const topBlocker = Object.entries(blockerCounts).sort((a, b) => b[1] - a[1])[0];
+  const topBlocker = Object.entries(blockerCounts).sort((a, b) => b[1] - a[1])[0] || null;
 
-  const bySymbol = {};
-  SYMBOLS.forEach(s => {
-    const sym = recent.filter(t => t.symbol === s);
-    bySymbol[s] = {
-      executed: sym.filter(t => t.orderPlaced).length,
-      nearMisses: nearMisses.filter(n => n.symbol === s).length,
-    };
-  });
+  return { recent, executed, blocked, topBlocker, blockerCounts };
+}
 
-  return { scans, executed, blocked, nearMisses, topBlocker, bySymbol, recent };
+// ─── Trade Performance Analysis ───────────────────────────────────────────────
+// Compare entry prices from recent trades to current prices.
+
+function analysePerformance(executed, prices) {
+  const results = [];
+  for (const t of executed) {
+    const currentPrice = prices[t.symbol]?.price;
+    if (!currentPrice || !t.price) continue;
+    const pctMove = t.side === 'buy'
+      ? ((currentPrice - t.price) / t.price) * 100
+      : ((t.price - currentPrice) / t.price) * 100;
+    results.push({
+      symbol:    t.symbol.replace('USDT', ''),
+      side:      t.side,
+      entry:     t.price,
+      current:   currentPrice,
+      pctMove,
+      strength:  t.signalStrength || 0,
+      size:      t.tradeSize || 0,
+      regime:    t.regime,
+      timestamp: t.timestamp,
+    });
+  }
+  return results;
+}
+
+// ─── Suggestions Engine ───────────────────────────────────────────────────────
+
+function generateSuggestions({ perf, stats, fearGreed, global, blockCount, recentAll }) {
+  const suggestions = [];
+  const winCount  = perf.filter(t => t.pctMove > 0).length;
+  const lossCount = perf.filter(t => t.pctMove <= 0).length;
+  const winRate   = perf.length > 0 ? (winCount / perf.length) * 100 : null;
+
+  // ── Performance-based ──────────────────────────────────────────────────────
+  if (perf.length === 0 && stats.blocked.length === 0) {
+    suggestions.push('No activity this window. Market is in consolidation — patience is the strategy.');
+  }
+
+  if (winRate !== null) {
+    if (winRate >= 65) {
+      suggestions.push(`Win rate ${winRate.toFixed(0)}% this window — strategy is dialled in. Hold current settings.`);
+    } else if (winRate >= 45) {
+      suggestions.push(`Win rate ${winRate.toFixed(0)}% — slightly below target. Review whether entries were at RSI extremes or near the 38/62 boundary.`);
+    } else if (winRate < 45) {
+      suggestions.push(`Win rate only ${winRate.toFixed(0)}% — consider waiting for deeper RSI readings (≤34 buys / ≥66 sells) before entering. Thresholds may need tightening in current volatility.`);
+    }
+  }
+
+  // ── High-strength trades underperforming ──────────────────────────────────
+  const highStr = perf.filter(t => t.strength >= 0.6);
+  const highStrLosers = highStr.filter(t => t.pctMove <= 0);
+  if (highStr.length >= 2 && highStrLosers.length / highStr.length > 0.5) {
+    suggestions.push('High-confidence signals are underperforming. Could indicate a trending market overriding mean-reversion — consider temporarily reducing position size by 30%.');
+  }
+
+  // ── Regime context ─────────────────────────────────────────────────────────
+  const deathCrossTrades = recentAll.filter(t => t.regime === 'death_cross');
+  const goldenCrossTrades = recentAll.filter(t => t.regime === 'golden_cross');
+  if (deathCrossTrades.length > goldenCrossTrades.length * 2) {
+    suggestions.push('Most scans are in death cross regime. Be cautious on buy signals if BTC is in a strong downtrend — death crosses on 5m can persist for hours.');
+  } else if (goldenCrossTrades.length > deathCrossTrades.length * 2) {
+    suggestions.push('Consistent golden cross regime. Sell signals have macro tailwind — be more aggressive on high-strength sell setups.');
+  }
+
+  // ── Blocker patterns ──────────────────────────────────────────────────────
+  if (stats.topBlocker) {
+    const [cond, count] = stats.topBlocker;
+    if (count >= 4) {
+      suggestions.push(`"${cond}" has blocked ${count} entries. If this is RSI not reaching threshold, price may be in a slow mean-reversion — patience over chasing.`);
+    }
+  }
+
+  // ── Fear & Greed context ──────────────────────────────────────────────────
+  if (fearGreed) {
+    if (fearGreed.value <= 20) {
+      suggestions.push(`Fear & Greed at ${fearGreed.value} (${fearGreed.label}). Extreme fear can mean capitulation — buy signals carry higher conviction. Watch for volume spike confirmation.`);
+    } else if (fearGreed.value >= 80) {
+      suggestions.push(`Fear & Greed at ${fearGreed.value} (${fearGreed.label}). Extreme greed = elevated reversal risk. Tighten stops or reduce sell signal sizes — euphoria can extend further than expected.`);
+    } else if (fearGreed.value >= 65) {
+      suggestions.push(`Market sentiment is greedy (${fearGreed.value}). Contrarian sell setups have better macro backing right now.`);
+    } else if (fearGreed.value <= 35) {
+      suggestions.push(`Market sentiment is fearful (${fearGreed.value}). Contrarian buy setups in death cross have higher mean-reversion potential.`);
+    }
+  }
+
+  // ── Macro market cap context ───────────────────────────────────────────────
+  if (global) {
+    const capChange = parseFloat(global.marketCapChange24h);
+    if (capChange <= -5) {
+      suggestions.push(`Total crypto market cap down ${Math.abs(capChange)}% in 24h. Consider pausing sell signals until market finds support — sharp drops can continue.`);
+    } else if (capChange >= 5) {
+      suggestions.push(`Total crypto market cap up ${capChange}% in 24h. Strong rally — buy signals may face resistance near highs, be selective.`);
+    }
+  }
+
+  return suggestions.length > 0 ? suggestions : ['Strategy appears balanced. Continue monitoring.'];
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function fmtPrice(price) {
-  if (!price) return 'N/A';
-  if (price >= 1000) return '$' + price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  if (price >= 1)    return '$' + price.toFixed(2);
-  return '$' + price.toFixed(6);
+function fmtPrice(p) {
+  if (!p) return 'N/A';
+  if (p >= 1000) return '$' + p.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (p >= 1)    return '$' + p.toFixed(2);
+  return '$' + p.toFixed(6);
 }
 
-function fmtMarketLine(symbol, price, change24h) {
-  const arrow = change24h >= 0 ? '▲' : '▼';
-  const pct = (change24h >= 0 ? '+' : '') + change24h.toFixed(2) + '% 24h';
-  return `${arrow} ${symbol.replace('USDT', '')}: ${fmtPrice(price)} (${pct})`;
+function fmtPct(n) {
+  return (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
 }
 
-// ─── Generate Full Report ─────────────────────────────────────────────────────
+function fmtTb(bytes) {
+  const t = bytes / 1e12;
+  return '$' + t.toFixed(2) + 'T';
+}
+
+// ─── Main Report ──────────────────────────────────────────────────────────────
 
 export async function generateReport(log) {
   const state = loadState();
-  const now = new Date();
+  const now   = new Date();
 
   const timeStr = now.toLocaleString('en-US', {
-    timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric', year: 'numeric',
-    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true, timeZoneName: 'short',
-  });
-
-  const prices = await fetch24hData();
-  const stats = getSessionStats(log, 4);
-
-  // Portfolio calculations
-  let totalPosValue = 0, unrealizedPnL = 0;
-  const posLines = [];
-  for (const [sym, pos] of Object.entries(state.positions || {})) {
-    const cp = prices[sym]?.price || 0;
-    const cv = pos.quantity * cp;
-    const pnl = cv - pos.totalCost;
-    totalPosValue += cv;
-    unrealizedPnL += pnl;
-    const pnlPct = pos.totalCost > 0 ? ((pnl / pos.totalCost) * 100).toFixed(1) : '0.0';
-    const arrow = pnl >= 0 ? '▲' : '▼';
-    posLines.push(`  ${arrow} ${sym.replace('USDT','')}: cost $${pos.totalCost.toFixed(2)} → $${cv.toFixed(2)}  (${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} / ${pnl >= 0 ? '+' : ''}${pnlPct}%)`);
-  }
-  const totalPortfolio = state.cash + totalPosValue;
-  const netChange = totalPortfolio - state.startingCapital;
-  const netPct = ((netChange / state.startingCapital) * 100).toFixed(1);
-
-  // All-time
-  const allExecuted = log.trades.filter(t => t.orderPlaced).length;
-  const allDeployed = log.trades.filter(t => t.orderPlaced).reduce((s, t) => s + (t.tradeSize || 0), 0);
-  const today = now.toISOString().slice(0, 10);
-  const todayTrades = log.trades.filter(t => t.timestamp.startsWith(today) && t.orderPlaced);
-  const todayDeployed = todayTrades.reduce((s, t) => s + (t.tradeSize || 0), 0);
-
-  // News
-  const [cointelegraph, coindesk] = await Promise.all([
-    fetchRSS('https://cointelegraph.com/rss', 4),
-    fetchRSS('https://www.coindesk.com/arc/outboundfeeds/rss/', 4),
-  ]);
-  const headlines = [...cointelegraph, ...coindesk].slice(0, 5);
-
-  const nextReport = new Date(Date.now() + REPORT_INTERVAL_MS);
-  const nextStr = nextReport.toLocaleTimeString('en-US', {
-    timeZone: 'America/Los_Angeles', hour: '2-digit', minute: '2-digit', timeZoneName: 'short',
+    timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: true, timeZoneName: 'short',
   });
 
   const mode = process.env.PAPER_TRADING !== 'false' ? '📋 PAPER' : '🔴 LIVE';
 
-  const L = [
-    `📊 REPORT — Claude Trading Bot`,
-    `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+  // Fetch everything in parallel
+  const [prices, fearGreed, global, ctHeadlines, cdHeadlines, macroHeadlines] = await Promise.all([
+    fetchPrices(),
+    fetchFearGreed(),
+    fetchGlobalMarket(),
+    fetchRSS('https://cointelegraph.com/rss', 3),
+    fetchRSS('https://www.coindesk.com/arc/outboundfeeds/rss/', 2),
+    fetchRSS('https://feeds.finance.yahoo.com/rss/2.0/headline?s=%5EVIX,SPY,AAPL&region=US&lang=en-US', 2),
+  ]);
+
+  // Portfolio (same calculation as telegram.js /portfolio)
+  const snap = buildPortfolioSnap(state, prices);
+
+  // Session stats
+  const stats = getSessionStats(log, 4);
+
+  // Trade performance vs current price
+  const perf = analysePerformance(stats.executed, prices);
+  const winners = perf.filter(t => t.pctMove > 0);
+  const losers  = perf.filter(t => t.pctMove <= 0);
+
+  // Today's totals
+  const today = now.toISOString().slice(0, 10);
+  const todayTrades = log.trades.filter(t => t.timestamp.startsWith(today) && t.orderPlaced);
+
+  // Suggestions
+  const suggestions = generateSuggestions({
+    perf, stats, fearGreed, global,
+    blockCount: stats.blocked.length,
+    recentAll:  stats.recent,
+  });
+
+  // ── News dedup + combine ───────────────────────────────────────────────────
+  const cryptoHeadlines = [...ctHeadlines, ...cdHeadlines]
+    .filter((h, i, arr) => arr.indexOf(h) === i)
+    .slice(0, 4);
+
+  const nextStr = new Date(Date.now() + REPORT_INTERVAL_MS).toLocaleTimeString('en-US', {
+    timeZone: 'America/Los_Angeles', hour: '2-digit', minute: '2-digit', timeZoneName: 'short',
+  });
+
+  // ── Assemble report ────────────────────────────────────────────────────────
+  const L = [];
+
+  const push = (...lines) => lines.forEach(l => L.push(l));
+
+  push(
+    `📊 <b>4-HOUR REPORT</b>  ${mode}`,
     `🕐 ${timeStr}`,
     ``,
-    `📈 MARKET OVERVIEW`,
-    `━━━━━━━━━━━━━━━━━━━━`,
-    ...SYMBOLS.map(s => prices[s] ? fmtMarketLine(s, prices[s].price, prices[s].change24h) : `• ${s.replace('USDT','')}: N/A`),
-    ``,
-    `💰 PORTFOLIO (${mode})`,
-    `━━━━━━━━━━━━━━━━━━━━`,
-    `Starting capital: $${state.startingCapital.toFixed(2)}`,
-    `Cash:             $${state.cash.toFixed(2)}`,
-    `Open positions:   $${totalPosValue.toFixed(2)}`,
-    `Total portfolio:  $${totalPortfolio.toFixed(2)}`,
-    `Unrealized P&L:   ${unrealizedPnL >= 0 ? '+' : ''}$${unrealizedPnL.toFixed(2)}`,
-    `Net change:       ${netChange >= 0 ? '+' : ''}$${netChange.toFixed(2)} (${netChange >= 0 ? '+' : ''}${netPct}%)`,
-    ...(posLines.length > 0 ? [``, `Positions:`, ...posLines] : []),
-    ``,
-    `Today: ${todayTrades.length} trade(s) | $${todayDeployed.toFixed(2)} deployed`,
-    `All-time: ${allExecuted} trade(s) | $${allDeployed.toFixed(2)} deployed`,
-    ``,
-    `📋 SESSION (last 4h)`,
-    `━━━━━━━━━━━━━━━━━━━━`,
-    `Scans:       ${stats.scans}`,
-    `Executed:    ${stats.executed}`,
-    `Blocked:     ${stats.blocked}`,
-    `Near-misses: ${stats.nearMisses.length}`,
-    ...(stats.nearMisses.length > 0 ? [
-      ``,
-      `⚡️ Near-misses (1 condition away):`,
-      ...stats.nearMisses.slice(0, 3).map(n => `  • ${n.symbol.replace('USDT','')} — blocked by: ${n.cond}`),
-      ...(stats.nearMisses.length > 3 ? [`  ...and ${stats.nearMisses.length - 3} more`] : []),
-    ] : []),
-    ``,
-    `✅ WHAT WENT RIGHT`,
-    `━━━━━━━━━━━━━━━━━━━━`,
-    stats.executed > 0 ? `• ${stats.executed} trade(s) executed on qualifying signals.` : `• No trades this window — filters held firm.`,
-    stats.nearMisses.length > 0 ? `• ${stats.nearMisses.length} near-miss(es) — indicators converging, watch for entries.` : `• Signals quiet — patience pays.`,
-    `• All-condition filter working as designed.`,
-    ``,
-    `⚠️ WHAT TO WATCH`,
-    `━━━━━━━━━━━━━━━━━━━━`,
-    stats.topBlocker ? `• Most common blocker: "${stats.topBlocker[0]}" (${stats.topBlocker[1]}x)` : `• No dominant blocker this window.`,
-    ``,
-    `🔄 ASSET ROTATION`,
-    `━━━━━━━━━━━━━━━━━━━━`,
-    ...SYMBOLS.map(s => {
-      const d = prices[s];
-      const st = stats.bySymbol[s];
-      const trend = (d?.change24h || 0) >= 0 ? '📈' : '📉';
-      return `${trend} ${s.replace('USDT','')}: ${d ? fmtPrice(d.price) : 'N/A'} | ${st.executed} executed | ${st.nearMisses} near-miss(es)`;
-    }),
-    ...(headlines.length > 0 ? [
-      ``,
-      `📰 CRYPTO HEADLINES`,
-      `━━━━━━━━━━━━━━━━━━━━`,
-      ...headlines.map(h => `• ${h.slice(0, 100)}`),
-    ] : []),
-    ``,
-    `─────────────────────────────`,
-    `Next report: ~${nextStr} | Assets: ${SYMBOLS.map(s => s.replace('USDT','')).join(', ')}`,
-  ];
+  );
 
-  return L.join('\n');
-}
+  // ── Market snapshot ────────────────────────────────────────────────────────
+  push(`<b>📈 MARKET SNAPSHOT</b>`);
+  for (const s of SYMBOLS) {
+    const d = prices[s];
+    if (!d) { push(`  • ${s.replace('USDT','')} — price unavailable`); continue; }
+    const arrow = d.change24h >= 0 ? '▲' : '▼';
+    push(`  ${arrow} <b>${s.replace('USDT','')}</b>: ${fmtPrice(d.price)}  (${fmtPct(d.change24h)} 24h)`);
+  }
+  if (fearGreed) {
+    const fgEmoji = fearGreed.value <= 25 ? '😱' : fearGreed.value <= 45 ? '😰' : fearGreed.value <= 55 ? '😐' : fearGreed.value <= 75 ? '😏' : '🤑';
+    push(`  ${fgEmoji} Fear &amp; Greed: <b>${fearGreed.value}/100</b> — ${fearGreed.label}`);
+  }
+  if (global) {
+    const capArrow = parseFloat(global.marketCapChange24h) >= 0 ? '▲' : '▼';
+    push(`  ${capArrow} Total Market Cap: ${fmtTb(global.totalMarketCap)}  (${fmtPct(parseFloat(global.marketCapChange24h))} 24h)  |  BTC Dom: ${global.btcDominance}%`);
+  }
+  push('');
 
-// ─── Telegram ─────────────────────────────────────────────────────────────────
+  // ── Portfolio ──────────────────────────────────────────────────────────────
+  push(`<b>💰 PORTFOLIO</b>`);
+  push(
+    `  Starting capital: $${(state.startingCapital || STARTING_CAPITAL).toFixed(2)}`,
+    `  USDC cash:        $${(state.cash || 0).toFixed(2)}`,
+    `  Open positions:   $${snap.posValue.toFixed(2)}`,
+    `  Total value:      $${snap.total.toFixed(2)}`,
+    `  Unrealized P&amp;L: ${snap.unrealizedPnL >= 0 ? '+' : ''}$${snap.unrealizedPnL.toFixed(2)}`,
+    `  Net change:       ${snap.net >= 0 ? '+' : ''}$${snap.net.toFixed(2)} (${snap.net >= 0 ? '+' : ''}${snap.netPct}%)`,
+  );
+  if (snap.posLines.length) {
+    push('');
+    snap.posLines.forEach(l => push(l));
+  }
+  push('');
 
-async function tg(text) {
-  if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) return;
-  try {
-    await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text, parse_mode: 'HTML' }),
+  // ── Session recap ──────────────────────────────────────────────────────────
+  push(`<b>📋 SESSION — last 4h</b>`);
+  push(
+    `  Scans: ${stats.recent.length}  |  Trades: ${stats.executed.length}  |  Blocked: ${stats.blocked.length}`,
+    `  Today total: ${todayTrades.length} trade(s)`,
+  );
+  push('');
+
+  // ── What went right ────────────────────────────────────────────────────────
+  push(`<b>✅ WHAT WENT RIGHT</b>`);
+  if (winners.length > 0) {
+    winners.forEach(t => {
+      push(`  • ${t.symbol} ${t.side.toUpperCase()}: entry ${fmtPrice(t.entry)} → ${fmtPrice(t.current)}  (${fmtPct(t.pctMove)})  signal ${Math.round(t.strength * 100)}%`);
     });
-  } catch {}
-}
+  } else if (stats.executed.length === 0) {
+    push('  • No trades fired this window — filters avoided low-quality setups.');
+    // Check if market went against us (good that we didn't trade)
+    const anyBigMoves = Object.values(prices).some(p => Math.abs(p.change24h) > 3);
+    if (anyBigMoves) push('  • Market had large moves (+/-3%+) — staying disciplined during volatility is a win.');
+  } else {
+    push('  • No open positions from this window are currently profitable.');
+  }
+  if (stats.blocked.length === 0 && stats.executed.length === 0) {
+    push('  • Strategy correctly silent in low-signal environment.');
+  }
+  push('');
 
-// ─── Telegram Command Handler ─────────────────────────────────────────────────
-
-export async function checkTelegramCommands(log) {
-  if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) return;
-  const state = loadState();
-  const offset = (state.lastUpdateId || 0) + 1;
-
-  let data;
-  try {
-    const r = await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates?offset=${offset}&timeout=1`, { signal: AbortSignal.timeout(5000) });
-    data = await r.json();
-  } catch { return; }
-
-  if (!data.ok || !data.result.length) return;
-
-  for (const update of data.result) {
-    state.lastUpdateId = update.update_id;
-    const raw = update.message?.text?.trim() || '';
-    const cmd = raw.split('@')[0].toLowerCase(); // strip @botname suffix
-
-    if (cmd === '/help') {
-      const mode = process.env.PAPER_TRADING !== 'false' ? '📋 Paper' : '🔴 Live';
-      await tg(
-        `🤖 <b>Claude Trading Bot</b>\n` +
-        `Mode: ${mode} | Assets: ${SYMBOLS.map(s => s.replace('USDT','')).join(', ')}\n\n` +
-        `<b>Commands</b>\n` +
-        `/status — Bot mode, trades today, last run\n` +
-        `/portfolio — Cash, open positions, P&amp;L\n` +
-        `/prices — Live prices + 24h change\n` +
-        `/trades — Today's trade activity\n` +
-        `/report — Full 4-hour report now\n` +
-        `/pause — Stop placing new trades\n` +
-        `/resume — Resume trading\n` +
-        `/help — This message`
-      );
-
-    } else if (cmd === '/status') {
-      const today = new Date().toISOString().slice(0, 10);
-      const todayCount = log.trades.filter(t => t.timestamp.startsWith(today) && t.orderPlaced).length;
-      const mode = process.env.PAPER_TRADING !== 'false' ? '📋 Paper Trading' : '🔴 Live Trading';
-      const statusIcon = state.paused ? '⏸' : '▶️';
-      const lastRun = log.trades.length > 0
-        ? new Date(log.trades[log.trades.length - 1].timestamp).toLocaleString('en-US', { timeZone: 'America/Los_Angeles', hour: '2-digit', minute: '2-digit', timeZoneName: 'short' })
-        : 'Never';
-      await tg(
-        `📊 <b>Bot Status</b>\n\n` +
-        `${statusIcon} ${state.paused ? 'PAUSED' : 'Running'}\n` +
-        `Mode: ${mode}\n` +
-        `Assets: ${SYMBOLS.map(s => s.replace('USDT','')).join(', ')}\n` +
-        `Timeframe: ${TIMEFRAME}\n` +
-        `Trades today: ${todayCount}/${MAX_TRADES}\n` +
-        `Last run: ${lastRun}`
-      );
-
-    } else if (cmd === '/portfolio') {
-      const prices = await fetch24hData();
-      let totalPos = 0, pnl = 0;
-      const posLines = [];
-      for (const [sym, pos] of Object.entries(state.positions || {})) {
-        const cp = prices[sym]?.price || 0;
-        const cv = pos.quantity * cp;
-        const p = cv - pos.totalCost;
-        totalPos += cv; pnl += p;
-        posLines.push(`  ${p >= 0 ? '▲' : '▼'} ${sym.replace('USDT','')}: $${pos.totalCost.toFixed(2)} → $${cv.toFixed(2)} (${p >= 0 ? '+' : ''}$${p.toFixed(2)})`);
-      }
-      const total = state.cash + totalPos;
-      const net = total - state.startingCapital;
-      await tg(
-        `💰 <b>Portfolio</b>\n\n` +
-        `Starting: $${state.startingCapital.toFixed(2)}\n` +
-        `Cash: $${state.cash.toFixed(2)}\n` +
-        `Positions: $${totalPos.toFixed(2)}\n` +
-        `Total: $${total.toFixed(2)}\n` +
-        `Net P&amp;L: ${net >= 0 ? '+' : ''}$${net.toFixed(2)}\n` +
-        (posLines.length ? `\nPositions:\n${posLines.join('\n')}` : `\nNo open positions`)
-      );
-
-    } else if (cmd === '/prices') {
-      const prices = await fetch24hData();
-      const lines = ['💹 <b>Current Prices</b>\n'];
-      SYMBOLS.forEach(s => {
-        const d = prices[s];
-        if (d) lines.push(fmtMarketLine(s, d.price, d.change24h));
-      });
-      await tg(lines.join('\n'));
-
-    } else if (cmd === '/trades') {
-      const today = new Date().toISOString().slice(0, 10);
-      const todayTrades = log.trades.filter(t => t.timestamp.startsWith(today));
-      if (!todayTrades.length) {
-        await tg('📋 No activity today yet.');
-      } else {
-        const lines = [`📋 <b>Today's Activity</b> (${todayTrades.length} scans)\n`];
-        todayTrades.slice(-10).forEach(t => {
-          const sym = t.symbol.replace('USDT','');
-          const icon = t.orderPlaced ? '✅' : '🚫';
-          const time = new Date(t.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Los_Angeles' });
-          lines.push(`${icon} ${sym} @ ${fmtPrice(t.price)} — ${time}`);
-        });
-        if (todayTrades.length > 10) lines.push(`...and ${todayTrades.length - 10} more`);
-        await tg(lines.join('\n'));
-      }
-
-    } else if (cmd === '/pause') {
-      state.paused = true;
-      await tg('⏸ <b>Bot paused.</b>\nNo new trades until you send /resume.');
-
-    } else if (cmd === '/resume') {
-      state.paused = false;
-      await tg('▶️ <b>Bot resumed.</b>\nBack to scanning for signals.');
-
-    } else if (cmd === '/report') {
-      await tg('⏳ Generating report...');
-      const report = await generateReport(log);
-      await tg(report);
+  // ── What went wrong ────────────────────────────────────────────────────────
+  push(`<b>❌ WHAT WENT WRONG</b>`);
+  if (losers.length > 0) {
+    losers.forEach(t => {
+      push(`  • ${t.symbol} ${t.side.toUpperCase()}: entry ${fmtPrice(t.entry)} → ${fmtPrice(t.current)}  (${fmtPct(t.pctMove)})  signal ${Math.round(t.strength * 100)}%`);
+    });
+  }
+  // Missed moves (blocked trades where price went our way)
+  const missedMoves = [];
+  for (const t of stats.blocked) {
+    const cp = prices[t.symbol]?.price;
+    if (!cp || !t.price) continue;
+    const wouldHaveBeen = t.side === 'buy'
+      ? ((cp - t.price) / t.price) * 100
+      : ((t.price - cp) / t.price) * 100;
+    if (wouldHaveBeen > 0.5) {
+      missedMoves.push({ symbol: t.symbol.replace('USDT',''), side: t.side, pct: wouldHaveBeen, cond: (t.conditions || []).find(c => !c.pass)?.label || '?' });
     }
   }
+  if (missedMoves.length > 0) {
+    push(`  ⚠️ Missed moves (blocked but would have profited):`);
+    missedMoves.slice(0, 3).forEach(m => {
+      push(`    • ${m.symbol} ${m.side.toUpperCase()}: blocked by "${m.cond}" — would be ${fmtPct(m.pct)}`);
+    });
+  }
+  if (losers.length === 0 && missedMoves.length === 0) {
+    push('  • No significant errors this window.');
+  }
+  push('');
 
-  saveState(state);
+  // ── Suggestions ───────────────────────────────────────────────────────────
+  push(`<b>💡 SUGGESTIONS</b>`);
+  suggestions.forEach(s => push(`  • ${s}`));
+  push('');
+
+  // ── Market intelligence ───────────────────────────────────────────────────
+  const allNews = [...cryptoHeadlines, ...macroHeadlines].filter(Boolean);
+  if (allNews.length > 0) {
+    push(`<b>📰 MARKET INTELLIGENCE</b>`);
+    allNews.slice(0, 5).forEach(h => push(`  • ${h.slice(0, 110)}`));
+    push('');
+  }
+
+  push(`─────────────────────────────`);
+  push(`⏰ Next report: ~${nextStr}  |  Assets: ${SYMBOLS.map(s => s.replace('USDT','')).join(', ')}`);
+
+  return L.join('\n');
 }

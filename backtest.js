@@ -176,40 +176,37 @@ function indicators(candles) {
     price,
     ma50:  sma(closes, 50),    // 50×5m = ~4.2hrs
     ma200: sma(closes, 200),   // 200×5m = ~16.7hrs
-    rsi7:  rsi(closes, 7),
+    rsi14: rsi(closes, 14),    // Contrarian G/D Cross uses RSI(14)
     bands: bb(closes, 20, 2),
-    stRsi: stochRSI(closes),
+    stRsi: stochRSI(closes),   // booster only
     volR:  volRatio(candles, 20),
   };
 }
 
-// ─── Entry conditions (5m MA50/MA200 regime, RSI(7) 25/75, StochRSI 10/90) ──
-// BB is a signal strength BOOSTER — not a hard gate.
-// Volume is NOT a hard gate — it's a signal strength booster only.
-// Hard gates: Regime (MA50/MA200) + RSI(7) + StochRSI = 3 total.
+// ─── Entry conditions — matches TradingView "Contrarian G/D Cross" strategy ──
+// Hard gates: Regime (MA50/MA200) + RSI(14) at 38/62 = 2 conditions only.
+// StochRSI, BB, Volume are signal strength BOOSTERS — NOT hard gates.
 
 function conditions(ind) {
-  const { ma50, ma200, rsi7, stRsi } = ind;
+  const { ma50, ma200, rsi14 } = ind;
   return {
     long: [
       { name: "5m Death Cross (MA50 < MA200)", met: ma50 && ma200 && ma50 < ma200 },
-      { name: "RSI(7) ≤ 25",                  met: rsi7 !== null && rsi7 <= 25 },
-      { name: "StochRSI ≤ 10",                 met: stRsi !== null && stRsi <= 10 },
+      { name: "RSI(14) ≤ 38",                  met: rsi14 !== null && rsi14 <= 38 },
     ],
     short: [
       { name: "5m Golden Cross (MA50 > MA200)", met: ma50 && ma200 && ma50 > ma200 },
-      { name: "RSI(7) ≥ 75",                   met: rsi7 !== null && rsi7 >= 75 },
-      { name: "StochRSI ≥ 90",                  met: stRsi !== null && stRsi >= 90 },
+      { name: "RSI(14) ≥ 62",                   met: rsi14 !== null && rsi14 >= 62 },
     ],
   };
 }
 
 // ─── Backtest engine ──────────────────────────────────────────────────────────
 
-function runBacktest(candles, symbol, minConditions = 3) {
+function runBacktest(candles, symbol, minConditions = 2) {
   const trades = [];
   let position  = null;
-  const WARMUP  = 210; // need 200 bars for MA200 + StochRSI warmup
+  const WARMUP  = 210; // need 200 bars for MA200
 
   for (let i = WARMUP; i < candles.length - 1; i++) {
     const snap  = indicators(candles.slice(0, i + 1));
@@ -272,7 +269,7 @@ function runBacktest(candles, symbol, minConditions = 3) {
 // ─── Per-condition miss analysis ──────────────────────────────────────────────
 // Counts how often each individual condition was the ONLY thing blocking an entry
 
-function nearMissAnalysis(candles, minConditions = 3) {
+function nearMissAnalysis(candles, minConditions = 2) {
   const WARMUP = 210;
   const counts = {};
 
@@ -381,26 +378,26 @@ async function main() {
       continue;
     }
 
-    // ── Strict (all 3 conditions) ──
-    const strict = runBacktest(candles, sym, 3);
+    // ── Strict (both conditions: Regime + RSI(14)) ──
+    const strict = runBacktest(candles, sym, 2);
     const s4     = stats(strict, `${sym} strict`);
-    console.log(`\n  ▶ STRICT (all 3 conditions met: Regime + RSI(7) + StochRSI)`);
+    console.log(`\n  ▶ STRICT (both conditions met: Regime + RSI(14) at 38/62)`);
     printStats(s4, "  ");
     allTrades.push(...strict);
     symbolResults.push({ sym, mode: "strict", ...s4 });
 
-    // ── Relaxed (2+ of 3 conditions) ──
+    // ── Relaxed (regime only, ignore RSI) ──
     if (testRelaxed) {
-      const relaxed = runBacktest(candles, sym, 2);
+      const relaxed = runBacktest(candles, sym, 1);
       const s3      = stats(relaxed, `${sym} relaxed`);
-      console.log(`\n  ▶ RELAXED (≥2 of 3 conditions met)`);
+      console.log(`\n  ▶ RELAXED (regime only — RSI(14) not required)`);
       printStats(s3, "  ");
       symbolResults.push({ sym, mode: "relaxed", ...s3 });
     }
 
     // ── Near-miss analysis ──
-    const nm = nearMissAnalysis(candles, 3);
-    console.log(`\n  ▶ Near-misses (2/3 met — what's blocking entries?)`);
+    const nm = nearMissAnalysis(candles, 2);
+    console.log(`\n  ▶ Near-misses (1/2 met — what's blocking entries?)`);
     if (Object.keys(nm).length === 0) {
       console.log("     None found.");
     } else {
@@ -469,18 +466,16 @@ async function main() {
   if (allTrades.length === 0) {
     console.log(`
   ⚠️  Zero strict trades triggered in ${LIMIT} bars of ${INTERVAL} data.
-  This means all 3 conditions (Regime + RSI(7) + StochRSI) never aligned.
+  This means both conditions (Regime + RSI(14) at 38/62) never aligned.
 
   Most likely causes:
   • MA50/MA200 cross doesn't happen often on ${INTERVAL} timeframe
-  • RSI(7) ≤ 25 / ≥ 75 is selective — needs genuine exhaustion
-  • StochRSI ≤ 10 / ≥ 90 is the tightest filter
+  • RSI(14) ≤ 38 / ≥ 62 requires genuine momentum exhaustion
 
   What to try:
-  1. Run with --relaxed (≥2 of 3 conditions)
+  1. Run with --relaxed (regime only, no RSI gate)
   2. Run with --interval 4H or 1d (longer candles, more regime crossings)
-  3. Widen RSI threshold to ≤30 / ≥70
-  4. Widen StochRSI to ≤20 / ≥80
+  3. Add more bars with --limit 2000
     `);
   } else {
     const combined = stats(allTrades, "combined");

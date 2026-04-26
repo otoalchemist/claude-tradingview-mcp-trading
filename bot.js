@@ -426,65 +426,61 @@ async function getPortfolioSnapshot(livePrices = {}) {
 }
 
 // ─── Signal Strength Scoring ─────────────────────────────────────────────────
-// Scores 0.0 → 1.0 based on how extreme each indicator reading is.
-// Trade size scales from 20% → 100% of MAX_TRADE_SIZE_USD.
-//
-// Professional approach: volume is a BOOSTER not a gate.
-// High volume on oversold = stronger signal. Low volume = weaker but still valid.
-// Thresholds tuned for 5m crypto: RSI(7) 25/75, StochRSI 10/90.
+// Matches TradingView "Contrarian G/D Cross" strategy.
+// Hard gate: RSI(14) ≤ 38 (buy) / ≥ 62 (sell)
+// Boosters: BB, StochRSI, Volume, Regime gap, VWAP band — scale position size.
 
-function calcSignalStrength(price, bias, { rsi7, bb, stochRsi, volumeRatio, ma50d, ma200d, vwapBands }) {
+function calcSignalStrength(price, bias, { rsi14, bb, stochRsi, volumeRatio, ma50d, ma200d, vwapBands }) {
   const scores = [];
   const clamp  = (v) => Math.max(0, Math.min(1, v));
 
   if (bias === "bullish") {
-    // RSI(7): deeper below 25 → stronger (25→0 maps to 0→1)
-    if (rsi7 !== null)
-      scores.push({ name: "RSI(7)", score: clamp((25 - rsi7) / 25) });
+    // RSI(14): deeper below 38 → stronger (38→0 maps to 0→1)
+    if (rsi14 !== null)
+      scores.push({ name: "RSI(14)", score: clamp((38 - rsi14) / 38) });
 
     // BB: how far below lower band (0%→2% below = 0→1)
     if (bb)
       scores.push({ name: "BB", score: clamp((bb.lower - price) / (bb.lower * 0.02)) });
 
-    // StochRSI: below 10 = deeply oversold (10→0 maps to 0→1)
-    if (stochRsi !== null)
-      scores.push({ name: "StochRSI", score: clamp((10 - stochRsi) / 10) });
-
-    // Volume: high volume on oversold = confirmation (1.5x→4x = 0→1)
-    // Low volume still scores 0 — doesn't block, just doesn't boost
-    if (volumeRatio !== null && volumeRatio >= 1.0)
-      scores.push({ name: "Volume", score: clamp((volumeRatio - 1.0) / 3.0) });
-
-    // Daily regime separation (death cross depth — 0%→2% = 0→1)
-    if (ma50d && ma200d && ma50d < ma200d)
-      scores.push({ name: "Daily Regime", score: clamp((ma200d - ma50d) / ma200d / 0.02) });
-
-    // VWAP lower band: price at/below lower2 = statistically extended
-    if (vwapBands && price <= vwapBands.lower2)
-      scores.push({ name: "VWAP Band", score: clamp((vwapBands.lower2 - price) / (vwapBands.lower2 * 0.01)) });
-
-  } else if (bias === "bearish") {
-    // RSI(7): above 75, deeper = stronger (75→100 maps to 0→1)
-    if (rsi7 !== null)
-      scores.push({ name: "RSI(7)", score: clamp((rsi7 - 75) / 25) });
-
-    // BB: how far above upper band
-    if (bb)
-      scores.push({ name: "BB", score: clamp((price - bb.upper) / (bb.upper * 0.02)) });
-
-    // StochRSI: above 90 = deeply overbought (90→100 maps to 0→1)
-    if (stochRsi !== null)
-      scores.push({ name: "StochRSI", score: clamp((stochRsi - 90) / 10) });
+    // StochRSI: booster only — below 20 adds confidence
+    if (stochRsi !== null && stochRsi < 50)
+      scores.push({ name: "StochRSI", score: clamp((50 - stochRsi) / 50) });
 
     // Volume booster
     if (volumeRatio !== null && volumeRatio >= 1.0)
       scores.push({ name: "Volume", score: clamp((volumeRatio - 1.0) / 3.0) });
 
-    // Daily regime separation (golden cross depth)
-    if (ma50d && ma200d && ma50d > ma200d)
-      scores.push({ name: "Daily Regime", score: clamp((ma50d - ma200d) / ma200d / 0.02) });
+    // Regime separation (death cross depth)
+    if (ma50d && ma200d && ma50d < ma200d)
+      scores.push({ name: "Regime", score: clamp((ma200d - ma50d) / ma200d / 0.02) });
 
-    // VWAP upper band: price at/above upper2
+    // VWAP lower band
+    if (vwapBands && price <= vwapBands.lower2)
+      scores.push({ name: "VWAP Band", score: clamp((vwapBands.lower2 - price) / (vwapBands.lower2 * 0.01)) });
+
+  } else if (bias === "bearish") {
+    // RSI(14): above 62, deeper = stronger (62→100 maps to 0→1)
+    if (rsi14 !== null)
+      scores.push({ name: "RSI(14)", score: clamp((rsi14 - 62) / 38) });
+
+    // BB: how far above upper band
+    if (bb)
+      scores.push({ name: "BB", score: clamp((price - bb.upper) / (bb.upper * 0.02)) });
+
+    // StochRSI: booster only — above 50 adds confidence
+    if (stochRsi !== null && stochRsi > 50)
+      scores.push({ name: "StochRSI", score: clamp((stochRsi - 50) / 50) });
+
+    // Volume booster
+    if (volumeRatio !== null && volumeRatio >= 1.0)
+      scores.push({ name: "Volume", score: clamp((volumeRatio - 1.0) / 3.0) });
+
+    // Regime separation (golden cross depth)
+    if (ma50d && ma200d && ma50d > ma200d)
+      scores.push({ name: "Regime", score: clamp((ma50d - ma200d) / ma200d / 0.02) });
+
+    // VWAP upper band
     if (vwapBands && price >= vwapBands.upper2)
       scores.push({ name: "VWAP Band", score: clamp((price - vwapBands.upper2) / (vwapBands.upper2 * 0.01)) });
   }
@@ -502,16 +498,14 @@ function calcTradeSize(strength, maxTradeSizeUSD, portfolioValue) {
 }
 
 // ─── Contrarian Entry Check ──────────────────────────────────────────────────
-// 2 hard-gate conditions tuned for 5m crypto (research-backed thresholds):
-//   • RSI(7) < 25 / > 75  — faster than RSI(14), catches exhaustion sooner
-//   • StochRSI < 10 / > 90 — deeply extreme timing filter
+// Hard gate: RSI(14) only — matches TradingView "Contrarian G/D Cross" strategy.
+//   • Bullish (Death Cross): RSI(14) ≤ 38  — oversold relative to regime
+//   • Bearish (Golden Cross): RSI(14) ≥ 62 — overbought relative to regime
 //
-// BB(20,2) is NOT a hard gate — it's a signal strength booster only.
-// Price AT/BEYOND the band increases position size but never blocks a trade.
-// High volume confirms, low volume just reduces position size.
+// StochRSI, BB, Volume — signal strength boosters only (scale position size).
 // Regime gating (5m MA50/MA200) happens before this is called.
 
-function runContrarianCheck(price, bias, { rsi7, stochRsi }) {
+function runContrarianCheck(price, bias, { rsi14 }) {
   const results = [];
 
   const check = (label, required, actual, pass) => {
@@ -524,29 +518,17 @@ function runContrarianCheck(price, bias, { rsi7, stochRsi }) {
 
   if (bias === "bullish") {
     check(
-      "RSI(7) oversold",
-      "≤ 25",
-      rsi7 !== null ? rsi7.toFixed(2) : "N/A",
-      rsi7 !== null && rsi7 <= 25,
-    );
-    check(
-      "StochRSI deeply oversold",
-      "≤ 10",
-      stochRsi !== null ? stochRsi.toFixed(2) : "N/A",
-      stochRsi !== null && stochRsi <= 10,
+      "RSI(14) oversold",
+      "≤ 38",
+      rsi14 !== null ? rsi14.toFixed(2) : "N/A",
+      rsi14 !== null && rsi14 <= 38,
     );
   } else {
     check(
-      "RSI(7) overbought",
-      "≥ 75",
-      rsi7 !== null ? rsi7.toFixed(2) : "N/A",
-      rsi7 !== null && rsi7 >= 75,
-    );
-    check(
-      "StochRSI deeply overbought",
-      "≥ 90",
-      stochRsi !== null ? stochRsi.toFixed(2) : "N/A",
-      stochRsi !== null && stochRsi >= 90,
+      "RSI(14) overbought",
+      "≥ 62",
+      rsi14 !== null ? rsi14.toFixed(2) : "N/A",
+      rsi14 !== null && rsi14 >= 62,
     );
   }
 
@@ -851,7 +833,7 @@ async function run() {
     // ── All indicators from 5m candles (regime + entry signals on same chart) ──
     const ma50        = calcSMA(closes, 50);           // 50 × 5m = ~4.2 hrs
     const ma200       = calcSMA(closes, 200);          // 200 × 5m = ~16.7 hrs
-    const rsi7        = calcRSI(closes, 7);
+    const rsi14       = calcRSI(closes, 14);
     const bb          = calcBollingerBands(closes, 20, 2);
     const stochRsi    = calcStochRSI(closes, 14, 14, 3);
     const volumeRatio = calcVolumeSpikeRatio(candles, 20);
@@ -869,8 +851,8 @@ async function run() {
     const fmt = (v, digits = 2) => v !== null && v !== undefined ? v.toFixed(digits) : "N/A";
     console.log(`\n  ── 5m Indicators (5-day view) ──────────────────────`);
     console.log(`  MA50:       $${fmt(ma50)}  |  MA200: $${fmt(ma200)}`);
-    console.log(`  RSI(7):     ${fmt(rsi7)}   ${rsi7 !== null ? (rsi7 <= 25 ? "🔴 OVERSOLD" : rsi7 >= 75 ? "🟢 OVERBOUGHT" : "") : ""}`);
-    console.log(`  StochRSI:   ${fmt(stochRsi)}   ${stochRsi !== null ? (stochRsi <= 10 ? "🔴 DEEPLY OVERSOLD" : stochRsi >= 90 ? "🟢 DEEPLY OVERBOUGHT" : "") : ""}`);
+    console.log(`  RSI(14):    ${fmt(rsi14)}   ${rsi14 !== null ? (rsi14 <= 38 ? "🔴 OVERSOLD" : rsi14 >= 62 ? "🟢 OVERBOUGHT" : "") : ""}`);
+    console.log(`  StochRSI:   ${fmt(stochRsi)}   ${stochRsi !== null ? (stochRsi <= 20 ? "🔴 DEEPLY OVERSOLD" : stochRsi >= 80 ? "🟢 DEEPLY OVERBOUGHT" : "") : ""}  (booster only)`);
     console.log(`  BB Lower:   ${bb ? "$" + fmt(bb.lower) : "N/A"}  |  BB Upper: ${bb ? "$" + fmt(bb.upper) : "N/A"}`);
     console.log(`  VWAP:       ${vwapBands ? "$" + fmt(vwapBands.vwap) : "N/A"}  |  ±2σ: $${vwapBands ? fmt(vwapBands.lower2) : "N/A"} / $${vwapBands ? fmt(vwapBands.upper2) : "N/A"}`);
     console.log(`  ATR(14):    $${atr14 ? fmt(atr14) : "N/A"}  →  SL ~$${atr14 ? fmt(price - 1.5 * atr14) : "N/A"}`);
@@ -895,13 +877,13 @@ async function run() {
       console.log(`  📦 Open position: ${pos.qty} ${symbol} @ avg $${pos.avgPrice?.toFixed(2) ?? "?"}`);
     }
 
-    // ── Entry conditions (2 hard gates — regime already gated above) ─────────
-    // BB is a signal strength booster only — not a hard gate
-    const { results, allPass } = runContrarianCheck(price, bias, { rsi7, stochRsi });
+    // ── Entry condition: RSI(14) hard gate — regime already gated above ──────
+    // BB, StochRSI, Volume — signal strength boosters only, not hard gates
+    const { results, allPass } = runContrarianCheck(price, bias, { rsi14 });
 
     // ── Signal strength — scales trade size 20%→100% of MAX_TRADE_SIZE_USD ────
     const { strength, scores: signalScores } = calcSignalStrength(price, bias, {
-      rsi7, bb, stochRsi, volumeRatio, ma50d: ma50, ma200d: ma200, vwapBands,
+      rsi14, bb, stochRsi, volumeRatio, ma50d: ma50, ma200d: ma200, vwapBands,
     });
     const tradeSize = calcTradeSize(strength, CONFIG.maxTradeSizeUSD, CONFIG.portfolioValue);
 
@@ -921,7 +903,7 @@ async function run() {
       timeframe: CONFIG.timeframe,
       price,
       indicators: {
-        rsi7, stochRsi, volumeRatio, atr14,
+        rsi14, stochRsi, volumeRatio, atr14,
         bbLower:    bb         ? bb.lower         : null,
         bbUpper:    bb         ? bb.upper         : null,
         vwap:       vwapBands  ? vwapBands.vwap   : null,
