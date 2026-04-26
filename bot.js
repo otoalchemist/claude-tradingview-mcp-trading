@@ -110,7 +110,7 @@ async function sendTelegram(message) {
   }
 }
 
-function buildTradeMessage(symbol, side, price, tradeSize, orderId, paperTrading, strength, signalScores) {
+function buildTradeMessage(symbol, side, price, tradeSize, orderId, paperTrading, strength, signalScores, portfolioSnap) {
   const emoji = side === "buy" ? "🟢" : "🔴";
   const modeTag = paperTrading ? " <i>(paper)</i>" : "";
   const pct = strength !== undefined ? Math.round(strength * 100) : null;
@@ -120,12 +120,24 @@ function buildTradeMessage(symbol, side, price, tradeSize, orderId, paperTrading
   const scoreLines = signalScores && signalScores.length
     ? "\n" + signalScores.map(s => `  • ${s.name}: ${Math.round(s.score * 100)}%`).join("\n")
     : "";
+
+  let portfolioLines = "";
+  if (portfolioSnap) {
+    const { usdcBalance, unrealizedPnL, portfolioValue } = portfolioSnap;
+    const pnlSign = unrealizedPnL >= 0 ? "+" : "";
+    portfolioLines =
+      `\n💵 USDC: $${usdcBalance.toFixed(2)}\n` +
+      `📊 Unrealized P&L: ${pnlSign}$${unrealizedPnL.toFixed(2)}\n` +
+      `🏦 Portfolio: $${portfolioValue.toFixed(2)}`;
+  }
+
   return (
     `${emoji} <b>${side.toUpperCase()} ${symbol}</b>${modeTag}\n` +
     `💰 Size: $${tradeSize.toFixed(2)}\n` +
     `📈 Price: $${price.toLocaleString()}\n` +
     (pct !== null ? `⚡ Signal: ${pct}%  [${bar}]${scoreLines}\n` : "") +
-    `🔑 Order: ${orderId}\n` +
+    `🔑 Order: ${orderId}` +
+    portfolioLines + "\n" +
     `🕐 ${new Date().toUTCString()}`
   );
 }
@@ -355,6 +367,71 @@ async function fetchDailyRegime(symbol) {
   } catch (err) {
     console.log(`⚠️  Daily regime fetch failed for ${symbol}: ${err.message}`);
     return { ma50d: null, ma200d: null };
+  }
+}
+
+// ─── Portfolio Snapshot ───────────────────────────────────────────────────────
+// Returns USDC balance, unrealized PnL, and total portfolio value.
+// In paper mode: uses portfolio.json (the bot's internal ledger).
+// In live mode: fetches real USD balance from Coinbase, combines with tracked positions.
+
+async function getPortfolioSnapshot(livePrices = {}) {
+  try {
+    let usdcBalance;
+
+    if (CONFIG.paperTrading) {
+      // Paper mode — read from portfolio.json ledger
+      if (existsSync("portfolio.json")) {
+        const state = JSON.parse(readFileSync("portfolio.json", "utf8"));
+        usdcBalance = state.cash ?? CONFIG.portfolioValue;
+      } else {
+        usdcBalance = CONFIG.portfolioValue;
+      }
+    } else {
+      // Live mode — fetch real balance from Coinbase
+      try {
+        const path = "/api/v3/brokerage/accounts";
+        const jwt  = buildCoinbaseJWT("GET", path);
+        const res  = await fetch(`https://api.coinbase.com${path}`, {
+          headers: { Authorization: `Bearer ${jwt}` },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const usd  = data.accounts?.find(a => a.currency === "USD" || a.currency === "USDC");
+          usdcBalance = usd ? parseFloat(usd.available_balance?.value ?? 0) : CONFIG.portfolioValue;
+        } else {
+          usdcBalance = CONFIG.portfolioValue;
+        }
+      } catch {
+        usdcBalance = CONFIG.portfolioValue;
+      }
+    }
+
+    // Unrealized PnL from open positions in portfolio.json
+    let unrealizedPnL = 0;
+    let positionsValue = 0;
+    if (existsSync("portfolio.json")) {
+      const state = JSON.parse(readFileSync("portfolio.json", "utf8"));
+      for (const [sym, pos] of Object.entries(state.positions || {})) {
+        const currentPrice = livePrices[sym];
+        if (currentPrice && pos.quantity) {
+          const currentValue = pos.quantity * currentPrice;
+          positionsValue += currentValue;
+          unrealizedPnL  += currentValue - pos.totalCost;
+        } else if (pos.quantity && pos.avgCost) {
+          // Fall back to avgCost if live price not available
+          positionsValue += pos.quantity * pos.avgCost;
+        }
+      }
+    }
+
+    return {
+      usdcBalance,
+      unrealizedPnL,
+      portfolioValue: usdcBalance + positionsValue,
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -760,6 +837,9 @@ async function run() {
     return;
   }
 
+  // Tracks live prices as each symbol is scanned — used for portfolio snapshot
+  const livePrices = {};
+
   // Loop through each symbol
   for (const symbol of CONFIG.symbols) {
     console.log(`\n${"─".repeat(59)}`);
@@ -778,6 +858,7 @@ async function run() {
 
     const closes = candles.map((c) => c.close);
     const price = closes[closes.length - 1];
+    livePrices[symbol] = price;
     console.log(`  Current price: $${price.toLocaleString()}`);
 
     // ── All indicators from 5m candles (regime + entry signals on same chart) ──
@@ -892,7 +973,8 @@ async function run() {
         logEntry.orderPlaced = true;
         logEntry.orderId = `PAPER-${Date.now()}`;
         updatePortfolio(symbol, side, price, tradeSize);
-        await sendTelegram(buildTradeMessage(symbol, side, price, tradeSize, logEntry.orderId, true, strength, signalScores));
+        const snap = await getPortfolioSnapshot(livePrices);
+        await sendTelegram(buildTradeMessage(symbol, side, price, tradeSize, logEntry.orderId, true, strength, signalScores, snap));
       } else {
         console.log(`\n🔴 PLACING LIVE ORDER — $${tradeSize.toFixed(2)} ${side.toUpperCase()} ${symbol}`);
         try {
@@ -901,7 +983,8 @@ async function run() {
           logEntry.orderId = order.orderId;
           console.log(`✅ ORDER PLACED — ${order.orderId}`);
           updatePortfolio(symbol, side, price, tradeSize);
-          await sendTelegram(buildTradeMessage(symbol, side, price, tradeSize, order.orderId, false, strength, signalScores));
+          const snap = await getPortfolioSnapshot(livePrices);
+          await sendTelegram(buildTradeMessage(symbol, side, price, tradeSize, order.orderId, false, strength, signalScores, snap));
         } catch (err) {
           console.log(`❌ ORDER FAILED — ${err.message}`);
           logEntry.error = err.message;
