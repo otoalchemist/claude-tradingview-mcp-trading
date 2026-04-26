@@ -22,10 +22,12 @@ function checkOnboarding() {
   const required = ["COINBASE_API_KEY", "COINBASE_PRIVATE_KEY"];
   const missing = required.filter((k) => !process.env[k]);
 
-  if (!existsSync(".env")) {
-    console.log(
-      "\n⚠️  No .env file found — opening it for you to fill in...\n",
-    );
+  // On Railway env vars are injected directly — no .env file needed.
+  // Only run the local onboarding flow when running on a developer machine.
+  const isLocal = !process.env.RAILWAY_ENVIRONMENT;
+
+  if (isLocal && !existsSync(".env")) {
+    console.log("\n⚠️  No .env file found — creating one for you...\n");
     writeFileSync(
       ".env",
       [
@@ -35,39 +37,26 @@ function checkOnboarding() {
         "",
         "# Trading config",
         "PORTFOLIO_VALUE_USD=1000",
-        "MAX_TRADE_SIZE_USD=100",
-        "MAX_TRADES_PER_DAY=3",
+        "MAX_TRADE_SIZE_USD=40",
+        "MAX_TRADES_PER_DAY=100",
         "PAPER_TRADING=true",
-        "SYMBOL=BTCUSDT",
-        "TIMEFRAME=4H",
+        "SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT",
+        "TIMEFRAME=5m",
       ].join("\n") + "\n",
     );
-    try {
-      execSync("open .env");
-    } catch {}
-    console.log(
-      "Fill in your Coinbase Advanced Trade credentials in .env then re-run: node bot.js\n",
-    );
+    console.log("Fill in your Coinbase credentials in .env then re-run: node bot.js\n");
     process.exit(0);
   }
 
   if (missing.length > 0) {
-    console.log(`\n⚠️  Missing credentials in .env: ${missing.join(", ")}`);
-    console.log("Opening .env for you now...\n");
-    try {
-      execSync("open .env");
-    } catch {}
-    console.log("Add the missing values then re-run: node bot.js\n");
-    process.exit(0);
+    console.log(`\n⚠️  Missing credentials: ${missing.join(", ")}`);
+    if (isLocal) console.log("Add them to your .env file then re-run: node bot.js\n");
+    else console.log("Add them as environment variables in Railway → Variables.\n");
+    process.exit(1);
   }
 
-  // Always print the CSV location so users know where to find their trade log
   const csvPath = new URL("trades.csv", import.meta.url).pathname;
   console.log(`\n📄 Trade log: ${csvPath}`);
-  console.log(
-    `   Open in Google Sheets or Excel any time — or tell Claude to move it:\n` +
-      `   "Move my trades.csv to ~/Desktop" or "Move it to my Documents folder"\n`,
-  );
 }
 
 // ─── Config ────────────────────────────────────────────────────────────────
