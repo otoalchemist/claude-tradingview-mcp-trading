@@ -8,6 +8,7 @@
  */
 
 import { readFileSync, existsSync, writeFileSync } from "fs";
+import { generateReport } from "./report.js";
 
 const TOKEN   = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
@@ -27,6 +28,7 @@ const BOT_COMMANDS = [
   { command: "prices",    description: "Live prices + 24h change" },
   { command: "portfolio", description: "Cash, open positions, P&L" },
   { command: "trades",    description: "Today's trade activity" },
+  { command: "report",    description: "Full intelligence report on demand" },
   { command: "pause",     description: "Stop placing new trades" },
   { command: "resume",    description: "Resume trading" },
 ];
@@ -242,6 +244,13 @@ async function cmdTrades() {
   await send(lines.join("\n"));
 }
 
+async function cmdReport() {
+  await send("⏳ Generating report...");
+  const log = loadLog();
+  const report = await generateReport(log);
+  await send(report);
+}
+
 async function cmdPause() {
   const state = loadPortfolio();
   state.paused = true;
@@ -271,6 +280,7 @@ async function handleUpdate(update) {
     else if (cmd === "prices")    await cmdPrices();
     else if (cmd === "portfolio") await cmdPortfolio();
     else if (cmd === "trades")    await cmdTrades();
+    else if (cmd === "report")    await cmdReport();
     else if (cmd === "pause")     await cmdPause();
     else if (cmd === "resume")    await cmdResume();
     else await send(`❓ Unknown command: /${cmd}\n\nSend /help to see available commands.`);
