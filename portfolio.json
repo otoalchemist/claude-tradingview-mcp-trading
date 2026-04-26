@@ -1,0 +1,14 @@
+{
+  "startingCapital": 1000,
+  "cash": 950,
+  "positions": {
+    "ETHUSDT": {
+      "quantity": 0.02146116173560707,
+      "avgCost": 2329.79,
+      "totalCost": 50
+    }
+  },
+  "lastReportTime": 1777183623075,
+  "lastUpdateId": 808902001,
+  "paused": false
+}

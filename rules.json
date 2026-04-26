@@ -1,50 +1,65 @@
 {
-  "watchlist": ["BTCUSDT"],
-  "default_timeframe": "1m",
+  "watchlist": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+  "default_timeframe": "5m",
+  "default_view": "5D",
 
   "strategy": {
-    "name": "VWAP + RSI(3) + EMA(8) Scalping Strategy",
-    "sources": ["Lewis Jackson"],
-    "description": "Three indicators, each doing a different job. EMA(8) for trend direction, VWAP for session bias, RSI(3) for entry timing. All three must align before a trade fires."
+    "name": "Contrarian Golden/Death Cross with Mean Reversion Confirmation",
+    "description": "Uses the golden/death cross to define the regime, then fades the trend — buying exhaustion during death cross regimes and selling exhaustion during golden cross regimes. Four confirmation indicators prevent entries into raw momentum: RSI(14) for stretch, Bollinger Bands for statistical extension, Stochastic RSI for precise timing, and volume for capitulation confirmation.",
+    "approach": "contrarian / mean-reversion",
+    "timeframe": "5-minute candles, 5-day view"
   },
 
   "indicators": {
-    "ema_8": "Trend direction. Price above EMA(8) = bullish momentum. Below = bearish.",
-    "vwap": "Session bias. Price above VWAP = buyers in control. Below = sellers. Resets at midnight UTC.",
-    "rsi_3": "Entry timing. RSI on 3 candles only — extremely sensitive. Below 30 in an uptrend = snap-back setup. Above 70 in a downtrend = reversal likely."
+    "regime_5m_ma50_ma200": "MA50 vs MA200 calculated on 5-minute candles — 5-day view. MA50 on 5m = 50×5min = ~4.2 hours. MA200 on 5m = 200×5min = ~16.7 hours. Death cross (MA50 < MA200) = buy regime. Golden cross (MA50 > MA200) = sell regime.",
+    "rsi_7": "RSI over 7 periods — faster than RSI(14), better suited for 5m crypto. Below 25 = deeply oversold. Above 75 = deeply overbought. Tighter thresholds filter weaker signals.",
+    "bollinger_bands": "20-period BB with 2 standard deviations. Price at/beyond lower band on 5m = statistically exhausted downside. Price at/beyond upper band = statistically exhausted upside.",
+    "stoch_rsi": "Stochastic RSI (14,14,3,3). Extreme thresholds: below 10 = deeply oversold (not just 20), above 90 = deeply overbought (not just 80). Higher bar = better timing.",
+    "volume_booster": "Volume is a SIGNAL STRENGTH BOOSTER, not a gate. High volume (≥1.5x avg) on an oversold condition = higher confidence = larger position size. Low volume = smaller size but trade still valid.",
+    "vwap_bands": "VWAP with ±1σ and ±2σ bands anchored to session start. Price at ±2σ VWAP band = institutionally significant exhaustion level. Used as strength booster.",
+    "atr_14": "ATR(14) on 5m candles for dynamic stop placement. Stop = 1.5x ATR from entry. Scales with actual volatility rather than fixed %."
   },
 
-  "bias_criteria": {
-    "bullish": ["Price is above VWAP", "Price is above EMA(8)"],
-    "bearish": ["Price is below VWAP", "Price is below EMA(8)"]
+  "regime": {
+    "source": "5-minute candles — MA50 vs MA200 on the 5-day/5m chart (matches TradingView 5D view)",
+    "death_cross": "MA50 (5m) is below MA200 (5m) — short-term bearish. Bot looks for BUY signals only (contrarian: fade oversold dips).",
+    "golden_cross": "MA50 (5m) is above MA200 (5m) — short-term bullish. Bot looks for SELL signals only (contrarian: fade overbought exhaustion)."
   },
 
   "entry_rules": {
     "long": [
-      "Price is above VWAP — buyers in control for the session",
-      "Price is above EMA(8) — uptrend confirmed",
-      "RSI(3) has dropped below 30 — short-term pullback in an uptrend, snap-back likely"
+      "REGIME: 5m MA50 below 5m MA200 (death cross — looking for BUY signals only)",
+      "RSI(7) at or below 25 — deeply oversold on 5m timeframe",
+      "Stochastic RSI (14,14,3,3) at or below 10 — deeply oversold momentum timing"
     ],
     "short": [
-      "Price is below VWAP — sellers in control",
-      "Price is below EMA(8) — downtrend confirmed",
-      "RSI(3) has spiked above 70 — overbought in a downtrend, reversal likely"
-    ]
+      "REGIME: 5m MA50 above 5m MA200 (golden cross — looking for SELL signals only)",
+      "RSI(7) at or above 75 — deeply overbought on 5m timeframe",
+      "Stochastic RSI (14,14,3,3) at or above 90 — deeply overbought momentum timing"
+    ],
+    "note": "BB Lower/Upper is NOT a hard gate — it is a signal strength booster. Price at/beyond the band increases position size but never blocks a trade."
   },
 
+  "signal_strength_boosters": [
+    "Volume ≥ 1.5x 20-period average — capitulation / exhaustion confirmed, increases position size",
+    "Price at VWAP ±2σ band — institutional-grade exhaustion level, increases position size",
+    "Deeper daily regime separation (MA50d vs MA200d gap) — stronger macro conviction, increases position size"
+  ],
+
   "exit_rules": [
-    "Exit when RSI(3) crosses back above 50 (for longs) or below 50 (for shorts)",
-    "Hard stop: 0.3% below entry for longs, 0.3% above entry for shorts",
-    "Take profit at next VWAP touch or EMA(8) cross"
+    "Primary: Price reverts to Bollinger Band middle (20-period SMA) — mean reversion target hit",
+    "Stop loss: 1.5x ATR(14) below entry for longs, above entry for shorts — dynamic, volatility-scaled",
+    "Time stop: If position not at target within 15 candles (75 minutes on 5m), exit — it's become a trend not a reversion",
+    "Take profit: 2.5x ATR(14) from entry for full exit"
   ],
 
   "risk_rules": [
-    "Risk maximum 1% of portfolio per trade",
-    "Maximum trade size capped by MAX_TRADE_SIZE_USD in .env",
+    "Maximum trade size capped by MAX_TRADE_SIZE_USD in .env — scales 20%-100% with signal strength",
     "Maximum trades per day capped by MAX_TRADES_PER_DAY in .env",
-    "Do not trade if price is more than 1.5% away from VWAP — overextended",
-    "Paper trade first — validate this strategy on your specific asset before going live"
+    "Volume acts as position sizer, not a blocker — low volume = smaller size, high volume = full size",
+    "Spot trading only: shorts require holding the asset; buys only in death cross regime",
+    "Paper trade first — validate fill quality and slippage before going live"
   ],
 
-  "notes": "Scalping strategy — designed for 1m to 5m timeframes. RSI(3) is intentionally fast and sensitive. Do not apply to higher timeframes."
+  "notes": "Research-backed contrarian strategy for 5m crypto. Key professional insights applied: (1) Daily MA200 for regime — 5m MAs are too noisy. (2) RSI(7) at 25/75 — faster and more selective than RSI(14) at 35/65. (3) StochRSI at 10/90 — extreme readings only. (4) Volume flipped from gate to booster — high volume on oversold = stronger signal. (5) ATR-based stops scale with actual volatility. (6) 15-candle time stop prevents trend-fighting."
 }
