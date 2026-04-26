@@ -821,9 +821,6 @@ async function run() {
   console.log(`\nStrategy: ${rules.strategy.name}`);
   console.log(`Symbols: ${CONFIG.symbols.join(", ")} | Timeframe: ${CONFIG.timeframe}`);
 
-  // Check Telegram commands (responds to /status, /portfolio, /prices, etc.)
-  await checkTelegramCommands(log);
-
   // Check if bot is paused via /pause command
   if (isPaused()) {
     console.log('\n⏸ Bot is paused. Send /resume to Telegram to restart.\n');
@@ -1012,11 +1009,47 @@ async function run() {
   console.log("═══════════════════════════════════════════════════════════\n");
 }
 
+// ─── Telegram Command Polling Loop ───────────────────────────────────────────
+// Polls every 2 seconds so commands (/prices, /portfolio, etc.) respond instantly
+// rather than waiting up to 15 minutes for the next cron fire.
+
+async function startCommandPolling() {
+  console.log("📡 Telegram command polling started (2s interval)");
+  while (true) {
+    try {
+      const log = loadLog();
+      await checkTelegramCommands(log);
+    } catch {
+      // swallow — polling errors shouldn't crash the process
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+}
+
+// ─── Trading Loop ─────────────────────────────────────────────────────────────
+// Runs the full trading scan every TRADE_INTERVAL_MS, independent of polling.
+
+const TRADE_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
+
+async function startTradingLoop() {
+  console.log(`⏰ Trading loop started — scanning every 15 minutes`);
+
+  // Run immediately on startup, then every 15 minutes
+  const tick = () =>
+    run().catch((err) => console.error("Trade run error:", err.message));
+
+  await tick();
+  setInterval(tick, TRADE_INTERVAL_MS);
+}
+
+// ─── Entry Point ─────────────────────────────────────────────────────────────
+
 if (process.argv.includes("--tax-summary")) {
   generateTaxSummary();
 } else {
-  run().catch((err) => {
-    console.error("Bot error:", err);
+  // Run trading loop and Telegram polling concurrently
+  Promise.all([startTradingLoop(), startCommandPolling()]).catch((err) => {
+    console.error("Fatal error:", err);
     process.exit(1);
   });
 }
