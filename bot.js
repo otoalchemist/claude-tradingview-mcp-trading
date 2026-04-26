@@ -10,7 +10,8 @@
  */
 
 import "dotenv/config";
-import { isPaused, updatePortfolio, shouldSendReport, markReportSent, generateReport, checkTelegramCommands } from "./report.js";
+import { isPaused, startCommandPolling } from "./telegram.js";
+import { updatePortfolio, shouldSendReport, markReportSent, generateReport } from "./report.js";
 import { readFileSync, writeFileSync, existsSync, appendFileSync } from "fs";
 import crypto from "crypto";
 import { execSync } from "child_process";
@@ -1009,22 +1010,6 @@ async function run() {
   console.log("═══════════════════════════════════════════════════════════\n");
 }
 
-// ─── Telegram Command Polling Loop ───────────────────────────────────────────
-// Polls every 2 seconds so commands (/prices, /portfolio, etc.) respond instantly
-// rather than waiting up to 15 minutes for the next cron fire.
-
-async function startCommandPolling() {
-  console.log("📡 Telegram command polling started (2s interval)");
-  while (true) {
-    try {
-      const log = loadLog();
-      await checkTelegramCommands(log);
-    } catch {
-      // swallow — polling errors shouldn't crash the process
-    }
-    await new Promise((r) => setTimeout(r, 2000));
-  }
-}
 
 // ─── Trading Loop ─────────────────────────────────────────────────────────────
 // Runs the full trading scan every TRADE_INTERVAL_MS, independent of polling.
