@@ -1029,10 +1029,10 @@ async function startCommandPolling() {
 // ─── Trading Loop ─────────────────────────────────────────────────────────────
 // Runs the full trading scan every TRADE_INTERVAL_MS, independent of polling.
 
-const TRADE_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
+const TRADE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
 async function startTradingLoop() {
-  console.log(`⏰ Trading loop started — scanning every 15 minutes`);
+  console.log(`⏰ Trading loop started — scanning every 5 minutes`);
 
   // Run immediately on startup, then every 15 minutes
   const tick = () =>
