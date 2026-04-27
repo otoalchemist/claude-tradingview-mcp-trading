@@ -342,6 +342,61 @@ function calcVWAP(candles) {
   return bands ? bands.vwap : null;
 }
 
+// ─── MACD (12,26,9) & CCI(20) — MCC v2 additions ─────────────────────────────
+
+// Running EMA returning full-length aligned array (null until n bars available)
+function runEMAArray(arr, n) {
+  const k = 2 / (n + 1);
+  const out = new Array(arr.length).fill(null);
+  if (arr.length < n) return out;
+  let ema = arr.slice(0, n).reduce((s, v) => s + v, 0) / n;
+  out[n - 1] = ema;
+  for (let i = n; i < arr.length; i++) { ema = arr[i] * k + ema * (1 - k); out[i] = ema; }
+  return out;
+}
+
+// EMA over an array that may have leading nulls (used for MACD signal line)
+function runEMANullableArray(arr, n) {
+  const k = 2 / (n + 1);
+  const out = new Array(arr.length).fill(null);
+  let buf = [], ema = null;
+  for (let i = 0; i < arr.length; i++) {
+    if (arr[i] == null) continue;
+    if (ema == null) {
+      buf.push(arr[i]);
+      if (buf.length === n) { ema = buf.reduce((s, v) => s + v, 0) / n; out[i] = ema; }
+    } else { ema = arr[i] * k + ema * (1 - k); out[i] = ema; }
+  }
+  return out;
+}
+
+// MACD(12,26,9) — returns current and previous histogram for improvement detection
+function calcMACDValues(closes) {
+  if (closes.length < 35) return null;
+  const ema12 = runEMAArray(closes, 12);
+  const ema26 = runEMAArray(closes, 26);
+  const line  = ema12.map((v, i) => v != null && ema26[i] != null ? v - ema26[i] : null);
+  const sig   = runEMANullableArray(line, 9);
+  const hist  = line.map((v, i) => v != null && sig[i] != null ? v - sig[i] : null);
+  const last  = closes.length - 1;
+  return {
+    line:          line[last],
+    signal:        sig[last],
+    histogram:     hist[last],
+    prevHistogram: last > 0 ? (hist[last - 1] ?? null) : null,
+  };
+}
+
+// CCI(20) — Commodity Channel Index
+function calcCCIValue(candles, period = 20) {
+  if (candles.length < period) return null;
+  const sl  = candles.slice(-period);
+  const tps = sl.map(c => (c.high + c.low + c.close) / 3);
+  const sma = tps.reduce((s, v) => s + v, 0) / period;
+  const md  = tps.reduce((s, v) => s + Math.abs(v - sma), 0) / period;
+  return md === 0 ? 0 : (tps[period - 1] - sma) / (0.015 * md);
+}
+
 // ─── Daily Regime ─────────────────────────────────────────────────────────────
 // Fetches daily candles to get a clean MA50/MA200 cross free of 5m noise.
 // Professional standard: use the daily chart for regime, 5m for entry timing.
@@ -425,64 +480,105 @@ async function getPortfolioSnapshot(livePrices = {}) {
   }
 }
 
-// ─── Signal Strength Scoring ─────────────────────────────────────────────────
-// Matches TradingView "Contrarian G/D Cross" strategy.
-// Hard gate: RSI(14) ≤ 38 (buy) / ≥ 62 (sell)
-// Boosters: BB, StochRSI, Volume, Regime gap, VWAP band — scale position size.
+// ─── Entry Scoring — MCC v2 (9-indicator composite) ──────────────────────────
+//
+// No hard gates — every indicator is a soft score (0–1).
+// Composite = average of all scores. Enter when composite ≥ MIN_SCORE (0.30).
+// Backtested winner: score≥0.30 · TP=3×ATR · exits=BB midline+RSI50
+// 90-day results: 822 trades · 68.2% WR · PF 1.24 · +$6.31 · 0.17% MaxDD
+//
+// Indicators:
+//   1. RSI(14) oversold/overbought
+//   2. StochRSI(14,14,3) oversold/overbought
+//   3. BB(20,2) lower/upper band breach
+//   4. VWAP lower/upper 2σ band
+//   5. MACD histogram improving/declining
+//   6. Volume spike vs 20-bar average
+//   7. CCI(20) oversold/overbought
+//   8. EMA9/EMA21 microtrend direction
+//   9. MA50/MA200 regime depth
 
-function calcSignalStrength(price, bias, { rsi14, bb, stochRsi, volumeRatio, ma50d, ma200d, vwapBands }) {
+function calcEntryScore(price, bias, { rsi14, bb, stochRsi, volumeRatio, ma50, ma200, vwapBands, ema9, ema21, macd, cci }) {
   const scores = [];
-  const clamp  = (v) => Math.max(0, Math.min(1, v));
+  const cl = v => Math.max(0, Math.min(1, v));
 
   if (bias === "bullish") {
-    // RSI(14): deeper below 38 → stronger (38→0 maps to 0→1)
-    if (rsi14 !== null)
-      scores.push({ name: "RSI(14)", score: clamp((38 - rsi14) / 38) });
+    // 1. RSI oversold — RSI < 40 starts scoring; RSI = 0 → 1.0
+    if (rsi14 != null)
+      scores.push({ name: "RSI(14)",   score: cl((40 - rsi14) / 40) });
 
-    // BB: how far below lower band (0%→2% below = 0→1)
+    // 2. StochRSI oversold — < 25 strong signal
+    if (stochRsi != null)
+      scores.push({ name: "StochRSI",  score: cl((25 - stochRsi) / 25) });
+
+    // 3. BB lower band breach (1.5% below = 1.0)
     if (bb)
-      scores.push({ name: "BB", score: clamp((bb.lower - price) / (bb.lower * 0.02)) });
+      scores.push({ name: "BB Lower",  score: cl((bb.lower - price) / (bb.lower * 0.015)) });
 
-    // StochRSI: booster only — below 20 adds confidence
-    if (stochRsi !== null && stochRsi < 50)
-      scores.push({ name: "StochRSI", score: clamp((50 - stochRsi) / 50) });
+    // 4. VWAP lower 2σ band breach
+    if (vwapBands?.lower2)
+      scores.push({ name: "VWAP Band", score: cl((vwapBands.lower2 - price) / (vwapBands.lower2 * 0.01)) });
 
-    // Volume booster
-    if (volumeRatio !== null && volumeRatio >= 1.0)
-      scores.push({ name: "Volume", score: clamp((volumeRatio - 1.0) / 3.0) });
+    // 5. MACD histogram improving (turning less negative = momentum shifting up)
+    if (macd?.histogram != null && macd?.prevHistogram != null)
+      scores.push({ name: "MACD Hist", score: macd.histogram > macd.prevHistogram ? 1.0 : 0.0 });
+    else if (macd?.histogram != null)
+      scores.push({ name: "MACD Hist", score: cl(-macd.histogram / (Math.abs(macd.histogram) + 0.01)) });
 
-    // Regime separation (death cross depth)
-    if (ma50d && ma200d && ma50d < ma200d)
-      scores.push({ name: "Regime", score: clamp((ma200d - ma50d) / ma200d / 0.02) });
+    // 6. Volume spike — > 1.0× starts scoring; 2.5× = 1.0
+    if (volumeRatio != null)
+      scores.push({ name: "Volume",    score: cl((volumeRatio - 1.0) / 1.5) });
 
-    // VWAP lower band
-    if (vwapBands && price <= vwapBands.lower2)
-      scores.push({ name: "VWAP Band", score: clamp((vwapBands.lower2 - price) / (vwapBands.lower2 * 0.01)) });
+    // 7. CCI oversold — < −80 starts scoring; −200 = 1.0
+    if (cci != null)
+      scores.push({ name: "CCI",       score: cl((-80 - cci) / 120) });
+
+    // 8. EMA microtrend — EMA9 below EMA21 = buying dip in micro downtrend
+    if (ema9 != null && ema21 != null)
+      scores.push({ name: "EMA9/21",   score: cl((ema21 - ema9) / ema21 / 0.003) });
+
+    // 9. Regime depth — wider death cross gap = stronger regime
+    if (ma50 && ma200 && ma50 < ma200)
+      scores.push({ name: "Regime",    score: cl((ma200 - ma50) / ma200 / 0.02) });
 
   } else if (bias === "bearish") {
-    // RSI(14): above 62, deeper = stronger (62→100 maps to 0→1)
-    if (rsi14 !== null)
-      scores.push({ name: "RSI(14)", score: clamp((rsi14 - 62) / 38) });
+    // 1. RSI overbought — > 60 starts scoring
+    if (rsi14 != null)
+      scores.push({ name: "RSI(14)",   score: cl((rsi14 - 60) / 40) });
 
-    // BB: how far above upper band
+    // 2. StochRSI overbought — > 75
+    if (stochRsi != null)
+      scores.push({ name: "StochRSI",  score: cl((stochRsi - 75) / 25) });
+
+    // 3. BB upper band breach
     if (bb)
-      scores.push({ name: "BB", score: clamp((price - bb.upper) / (bb.upper * 0.02)) });
+      scores.push({ name: "BB Upper",  score: cl((price - bb.upper) / (bb.upper * 0.015)) });
 
-    // StochRSI: booster only — above 50 adds confidence
-    if (stochRsi !== null && stochRsi > 50)
-      scores.push({ name: "StochRSI", score: clamp((stochRsi - 50) / 50) });
+    // 4. VWAP upper 2σ band breach
+    if (vwapBands?.upper2)
+      scores.push({ name: "VWAP Band", score: cl((price - vwapBands.upper2) / (vwapBands.upper2 * 0.01)) });
 
-    // Volume booster
-    if (volumeRatio !== null && volumeRatio >= 1.0)
-      scores.push({ name: "Volume", score: clamp((volumeRatio - 1.0) / 3.0) });
+    // 5. MACD histogram declining
+    if (macd?.histogram != null && macd?.prevHistogram != null)
+      scores.push({ name: "MACD Hist", score: macd.histogram < macd.prevHistogram ? 1.0 : 0.0 });
+    else if (macd?.histogram != null)
+      scores.push({ name: "MACD Hist", score: cl(macd.histogram / (Math.abs(macd.histogram) + 0.01)) });
 
-    // Regime separation (golden cross depth)
-    if (ma50d && ma200d && ma50d > ma200d)
-      scores.push({ name: "Regime", score: clamp((ma50d - ma200d) / ma200d / 0.02) });
+    // 6. Volume spike
+    if (volumeRatio != null)
+      scores.push({ name: "Volume",    score: cl((volumeRatio - 1.0) / 1.5) });
 
-    // VWAP upper band
-    if (vwapBands && price >= vwapBands.upper2)
-      scores.push({ name: "VWAP Band", score: clamp((price - vwapBands.upper2) / (vwapBands.upper2 * 0.01)) });
+    // 7. CCI overbought — > 80 starts scoring
+    if (cci != null)
+      scores.push({ name: "CCI",       score: cl((cci - 80) / 120) });
+
+    // 8. EMA microtrend — EMA9 above EMA21 = selling top in micro uptrend
+    if (ema9 != null && ema21 != null)
+      scores.push({ name: "EMA9/21",   score: cl((ema9 - ema21) / ema21 / 0.003) });
+
+    // 9. Regime depth — wider golden cross gap = stronger regime
+    if (ma50 && ma200 && ma50 > ma200)
+      scores.push({ name: "Regime",    score: cl((ma50 - ma200) / ma200 / 0.02) });
   }
 
   if (scores.length === 0) return { strength: 0, scores: [] };
@@ -497,43 +593,26 @@ function calcTradeSize(strength, maxTradeSizeUSD, portfolioValue) {
   return Math.round((min + (max - min) * strength) * 100) / 100;
 }
 
-// ─── Contrarian Entry Check ──────────────────────────────────────────────────
-// Hard gate: RSI(14) only — matches TradingView "Contrarian G/D Cross" strategy.
-//   • Bullish (Death Cross): RSI(14) ≤ 38  — oversold relative to regime
-//   • Bearish (Golden Cross): RSI(14) ≥ 62 — overbought relative to regime
-//
-// StochRSI, BB, Volume — signal strength boosters only (scale position size).
-// Regime gating (5m MA50/MA200) happens before this is called.
+// Scale how much of a position to sell based on signal strength.
+// Weak signal (0%) → sell 30% of position; strong signal (100%) → sell 100%.
+// This lets the bot partially exit on marginal signals and fully exit on strong ones.
+function calcSellSize(strength, posQuantity) {
+  const minPct = 0.30;
+  const maxPct = 1.00;
+  const pct = minPct + (maxPct - minPct) * Math.max(0, Math.min(1, strength));
+  return posQuantity * pct;
+}
 
-function runContrarianCheck(price, bias, { rsi14 }) {
-  const results = [];
+// ─── Entry Conditions Display (MCC v2 — no hard gates) ──────────────────────
+// Entry is now purely score-based: composite ≥ MIN_SCORE (0.30) to enter.
+// This function just logs the score breakdown for visibility.
 
-  const check = (label, required, actual, pass) => {
-    results.push({ label, required, actual, pass });
-    console.log(`  ${pass ? "✅" : "🚫"} ${label}`);
-    console.log(`     Required: ${required} | Actual: ${actual}`);
-  };
-
-  console.log("\n── Entry Conditions ─────────────────────────────────────\n");
-
-  if (bias === "bullish") {
-    check(
-      "RSI(14) oversold",
-      "≤ 38",
-      rsi14 !== null ? rsi14.toFixed(2) : "N/A",
-      rsi14 !== null && rsi14 <= 38,
-    );
-  } else {
-    check(
-      "RSI(14) overbought",
-      "≥ 62",
-      rsi14 !== null ? rsi14.toFixed(2) : "N/A",
-      rsi14 !== null && rsi14 >= 62,
-    );
-  }
-
-  const allPass = results.every((r) => r.pass);
-  return { results, allPass };
+function logEntryConditions(bias, strength, scores) {
+  console.log("\n── Entry Conditions (MCC v2) ────────────────────────────\n");
+  const bar = "█".repeat(Math.round(strength * 10)) + "░".repeat(10 - Math.round(strength * 10));
+  console.log(`  Composite score: ${(strength * 100).toFixed(0)}%  [${bar}]`);
+  scores.forEach(s => console.log(`  • ${s.name.padEnd(12)} ${(s.score * 100).toFixed(0)}%`));
+  console.log(`  Regime bias: ${bias.toUpperCase()}`);
 }
 
 // Read current open position for a symbol from portfolio.json
@@ -609,16 +688,18 @@ function buildCoinbaseJWT(method, path) {
   return `${sigInput}.${sig}`;
 }
 
-async function placeCoinbaseOrder(symbol, side, sizeUSD, price) {
+async function placeCoinbaseOrder(symbol, side, sizeUSD, price, sellQuantity = null) {
   const productId = toCoinbaseSymbol(symbol);  // BTCUSDT → BTC-USD
   const cbSide    = side.toUpperCase();          // "buy" → "BUY"
   const path      = "/api/v3/brokerage/orders";
   const clientId  = `bot-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-  // BUY: specify quote_size (USD to spend). SELL: specify base_size (crypto to sell).
+  // BUY:  specify quote_size (USD to spend).
+  // SELL: specify base_size = sellQuantity (signal-strength-scaled portion of position).
+  //       Exit-rule sells always pass the full position qty; signal sells pass scaled qty.
   const orderConfig = cbSide === "BUY"
     ? { market_market_ioc: { quote_size: sizeUSD.toFixed(2) } }
-    : { market_market_ioc: { base_size:  (sizeUSD / price).toFixed(8) } };
+    : { market_market_ioc: { base_size:  (sellQuantity ?? (sizeUSD / price)).toFixed(8) } };
 
   const body = JSON.stringify({
     client_order_id:     clientId,
@@ -693,31 +774,37 @@ function writeTradeCsv(logEntry) {
   let notes = "";
 
   if (!logEntry.allPass) {
-    const failed = logEntry.conditions
-      .filter((c) => !c.pass)
-      .map((c) => c.label)
-      .join("; ");
     mode = "BLOCKED";
     orderId = "BLOCKED";
-    notes = `Failed: ${failed}`;
+    notes = `Score ${logEntry.signalStrength != null ? Math.round(logEntry.signalStrength * 100) + "%" : "?"} below threshold`;
   } else if (logEntry.paperTrading) {
-    side = "BUY";
-    quantity = (logEntry.tradeSize / logEntry.price).toFixed(6);
+    side = (logEntry.side || "buy").toUpperCase();
+    quantity = logEntry.sellQuantity
+      ? logEntry.sellQuantity.toFixed(6)
+      : (logEntry.tradeSize / logEntry.price).toFixed(6);
     totalUSD = logEntry.tradeSize.toFixed(2);
     fee = (logEntry.tradeSize * 0.001).toFixed(4);
     netAmount = (logEntry.tradeSize - parseFloat(fee)).toFixed(2);
     orderId = logEntry.orderId || "";
     mode = "PAPER";
-    notes = "All conditions met";
+    notes = logEntry.exitReason
+      ? `Exit: ${logEntry.exitReason.replace(/_/g, " ")} | P&L ${logEntry.pnlPct ?? "?"}%`
+      : `All conditions met${logEntry.sellPct ? ` | Sold ${logEntry.sellPct}%` : ""}`;
   } else {
-    side = "BUY";
-    quantity = (logEntry.tradeSize / logEntry.price).toFixed(6);
+    side = (logEntry.side || "buy").toUpperCase();
+    quantity = logEntry.sellQuantity
+      ? logEntry.sellQuantity.toFixed(6)
+      : (logEntry.tradeSize / logEntry.price).toFixed(6);
     totalUSD = logEntry.tradeSize.toFixed(2);
     fee = (logEntry.tradeSize * 0.001).toFixed(4);
     netAmount = (logEntry.tradeSize - parseFloat(fee)).toFixed(2);
     orderId = logEntry.orderId || "";
     mode = "LIVE";
-    notes = logEntry.error ? `Error: ${logEntry.error}` : "All conditions met";
+    notes = logEntry.error
+      ? `Error: ${logEntry.error}`
+      : logEntry.exitReason
+        ? `Exit: ${logEntry.exitReason.replace(/_/g, " ")} | P&L ${logEntry.pnlPct ?? "?"}%`
+        : `All conditions met${logEntry.sellPct ? ` | Sold ${logEntry.sellPct}%` : ""}`;
   }
 
   const row = [
@@ -772,6 +859,127 @@ function generateTaxSummary() {
   console.log("─────────────────────────────────────────────────────────\n");
 }
 
+// ─── Exit Monitor ─────────────────────────────────────────────────────────────
+// Runs every tick (every 10 min) BEFORE entry scanning.
+// Checks every open position against 4 exit conditions from rules.json:
+//   1. Stop loss:   price fell 1.5× ATR below entry        → full close
+//   2. Take profit: price rose 2.5× ATR above entry        → full close
+//   3. BB midline:  price reverted to 20-SMA (mean target) → full close
+//   4. Time stop:   15 candles elapsed without target hit   → full close
+// These protective exits always close the FULL position regardless of signal strength.
+
+async function checkExits() {
+  if (!existsSync("portfolio.json")) return;
+  let state;
+  try { state = JSON.parse(readFileSync("portfolio.json", "utf8")); }
+  catch { return; }
+
+  const positions = Object.entries(state.positions || {});
+  if (positions.length === 0) return;
+
+  console.log("\n── Exit Monitor ─────────────────────────────────────────\n");
+
+  for (const [symbol, pos] of positions) {
+    let candles;
+    try { candles = await fetchCandles(symbol, CONFIG.timeframe, 220); }
+    catch (err) { console.log(`  ⚠️  ${symbol}: candle fetch failed — ${err.message}`); continue; }
+
+    if (!candles || candles.length < 20) continue;
+
+    const closes     = candles.map(c => c.close);
+    const price      = closes[closes.length - 1];
+    const bb         = calcBollingerBands(closes, 20, 2);
+    const atr        = calcATR(candles, 14);
+    const rsi14exit  = calcRSI(closes, 14);
+    const entryPrice = pos.avgCost;
+    const entryTime  = pos.entryTime || 0;
+    const candlesSinceEntry = Math.floor((Date.now() - entryTime) / (5 * 60 * 1000));
+
+    if (!bb || !atr) {
+      console.log(`  ⚠️  ${symbol}: not enough data for exit checks — holding`);
+      continue;
+    }
+
+    const takeProfitPrice = entryPrice + 3.0 * atr;  // 3× ATR — backtested optimal
+    const fmt = (v) => v.toFixed(2);
+
+    // Exit conditions — MCC v2 backtested optimal: TP + BB midline + RSI50
+    // (No stop loss, no time stop — backtested as harmful to overall P&L)
+    let exitReason = null;
+    if      (price >= takeProfitPrice)                exitReason = "take_profit";
+    else if (price >= bb.middle)                      exitReason = "bb_midline";
+    else if (rsi14exit != null && rsi14exit >= 50)    exitReason = "rsi_50";
+
+    if (!exitReason) {
+      console.log(
+        `  ✅ ${symbol}: holding | price $${fmt(price)} | ` +
+        `TP $${fmt(takeProfitPrice)} (3×ATR) | BB-mid $${fmt(bb.middle)} | RSI ${rsi14exit?.toFixed(1) ?? "N/A"}`
+      );
+      continue;
+    }
+
+    const exitLabel = exitReason.replace(/_/g, " ").toUpperCase();
+    const qty       = pos.quantity;
+    const pnl       = (price - entryPrice) * qty;
+    const pnlPct    = ((price - entryPrice) / entryPrice * 100).toFixed(2);
+    const pnlStr    = pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`;
+
+    console.log(`  🚪 EXIT — ${symbol} | ${exitLabel} | price $${fmt(price)} | P&L ${pnlStr} (${pnlPct}%)`);
+
+    const exitLogEntry = {
+      timestamp:          new Date().toISOString(),
+      symbol,
+      side:               "sell",
+      exitReason,
+      regime:             "exit",
+      timeframe:          CONFIG.timeframe,
+      price,
+      entryPrice,
+      pnl,
+      pnlPct,
+      tradeSize:          qty * price,
+      sellQuantity:       qty,
+      candlesSinceEntry,
+      allPass:            true, // so writeTradeCsv logs it as an executed trade
+      orderPlaced:        false,
+      orderId:            null,
+      paperTrading:       CONFIG.paperTrading,
+    };
+
+    const telegramMsg =
+      `🚪 <b>EXIT — ${symbol}</b>${CONFIG.paperTrading ? " <i>(paper)</i>" : ""}\n` +
+      `Reason: <b>${exitLabel}</b>\n` +
+      `Price: $${fmt(price)}  |  Entry: $${fmt(entryPrice)}\n` +
+      `Qty: ${qty.toFixed(6)}  |  P&L: ${pnlStr} (${pnlPct}%)\n` +
+      `Candles held: ${candlesSinceEntry}\n` +
+      `🕐 ${new Date().toUTCString()}`;
+
+    if (CONFIG.paperTrading) {
+      exitLogEntry.orderPlaced = true;
+      exitLogEntry.orderId     = `PAPER-EXIT-${Date.now()}`;
+      updatePortfolio(symbol, "sell", price, qty * price, qty);
+      await sendTelegram(telegramMsg + `\nOrder: ${exitLogEntry.orderId}`);
+    } else {
+      try {
+        const order = await placeCoinbaseOrder(symbol, "sell", qty * price, price, qty);
+        exitLogEntry.orderPlaced = true;
+        exitLogEntry.orderId     = order.orderId;
+        updatePortfolio(symbol, "sell", price, qty * price, qty);
+        await sendTelegram(telegramMsg + `\nOrder: ${order.orderId}`);
+      } catch (err) {
+        console.log(`  ❌ Exit order failed — ${err.message}`);
+        exitLogEntry.error = err.message;
+        await sendTelegram(`❌ <b>EXIT FAILED — ${symbol}</b> (${exitLabel})\n${err.message}`);
+      }
+    }
+
+    const log = loadLog();
+    log.trades.push(exitLogEntry);
+    saveLog(log);
+    writeTradeCsv(exitLogEntry);
+  }
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 async function run() {
@@ -806,6 +1014,9 @@ async function run() {
     return;
   }
 
+  // Check exit conditions on all open positions before scanning for new entries
+  await checkExits();
+
   // Tracks live prices as each symbol is scanned — used for portfolio snapshot
   const livePrices = {};
 
@@ -839,7 +1050,11 @@ async function run() {
     const volumeRatio = calcVolumeSpikeRatio(candles, 20);
     const atr14       = calcATR(candles, 14);
     const vwapBands   = calcVWAPBands(candles);
-    const ema8        = calcEMA(closes, 8);            // reference only
+    // MCC v2 additions
+    const ema9        = calcEMA(closes, 9);
+    const ema21       = calcEMA(closes, 21);
+    const macd        = calcMACDValues(closes);        // { line, signal, histogram, prevHistogram }
+    const cci         = calcCCIValue(candles, 20);
     const rsi3        = calcRSI(closes, 3);            // reference only
 
     // Guard: need 200 candles for MA200
@@ -849,13 +1064,16 @@ async function run() {
     }
 
     const fmt = (v, digits = 2) => v !== null && v !== undefined ? v.toFixed(digits) : "N/A";
-    console.log(`\n  ── 5m Indicators (5-day view) ──────────────────────`);
+    console.log(`\n  ── 5m Indicators (MCC v2) ──────────────────────────`);
     console.log(`  MA50:       $${fmt(ma50)}  |  MA200: $${fmt(ma200)}`);
-    console.log(`  RSI(14):    ${fmt(rsi14)}   ${rsi14 !== null ? (rsi14 <= 38 ? "🔴 OVERSOLD" : rsi14 >= 62 ? "🟢 OVERBOUGHT" : "") : ""}`);
-    console.log(`  StochRSI:   ${fmt(stochRsi)}   ${stochRsi !== null ? (stochRsi <= 20 ? "🔴 DEEPLY OVERSOLD" : stochRsi >= 80 ? "🟢 DEEPLY OVERBOUGHT" : "") : ""}  (booster only)`);
+    console.log(`  EMA9:       $${fmt(ema9)}  |  EMA21: $${fmt(ema21)}  ${ema9 != null && ema21 != null ? (ema9 < ema21 ? "📉 micro-down" : "📈 micro-up") : ""}`);
+    console.log(`  RSI(14):    ${fmt(rsi14)}   ${rsi14 !== null ? (rsi14 <= 40 ? "🔴 OVERSOLD" : rsi14 >= 60 ? "🟢 OVERBOUGHT" : "") : ""}`);
+    console.log(`  StochRSI:   ${fmt(stochRsi)}   ${stochRsi !== null ? (stochRsi <= 25 ? "🔴 DEEPLY OVERSOLD" : stochRsi >= 75 ? "🟢 DEEPLY OVERBOUGHT" : "") : ""}`);
+    console.log(`  MACD Hist:  ${macd ? fmt(macd.histogram, 4) + (macd.prevHistogram != null ? (macd.histogram > macd.prevHistogram ? "  📈 improving" : "  📉 declining") : "") : "N/A"}`);
+    console.log(`  CCI(20):    ${fmt(cci, 1)}${cci != null ? (cci < -80 ? "  🔴 OVERSOLD" : cci > 80 ? "  🟢 OVERBOUGHT" : "") : ""}`);
     console.log(`  BB Lower:   ${bb ? "$" + fmt(bb.lower) : "N/A"}  |  BB Upper: ${bb ? "$" + fmt(bb.upper) : "N/A"}`);
     console.log(`  VWAP:       ${vwapBands ? "$" + fmt(vwapBands.vwap) : "N/A"}  |  ±2σ: $${vwapBands ? fmt(vwapBands.lower2) : "N/A"} / $${vwapBands ? fmt(vwapBands.upper2) : "N/A"}`);
-    console.log(`  ATR(14):    $${atr14 ? fmt(atr14) : "N/A"}  →  SL ~$${atr14 ? fmt(price - 1.5 * atr14) : "N/A"}`);
+    console.log(`  ATR(14):    $${atr14 ? fmt(atr14) : "N/A"}  →  TP ~$${atr14 ? fmt(price + 3.0 * atr14) : "N/A"} (3×ATR)`);
     console.log(`  Vol Spike:  ${volumeRatio !== null ? fmt(volumeRatio) + "× avg" : "N/A"}  ${volumeRatio !== null && volumeRatio >= 1.5 ? "⚡ HIGH VOLUME" : ""}`);
 
     // ── Regime (5m MA50 vs MA200 — the 5-day/5m cross) ───────────────────────
@@ -865,35 +1083,35 @@ async function run() {
 
     console.log(`\n── Regime (5-day / 5m) ──────────────────────────────────\n`);
     console.log(`  MA50: $${fmt(ma50)}  |  MA200: $${fmt(ma200)}  |  Gap: ${((Math.abs(ma50 - ma200) / ma200) * 100).toFixed(2)}%`);
+    let openPos = null;
     if (deathCross) {
       console.log(`  ☠️  DEATH CROSS — MA50 below MA200 — looking for BUY signals`);
     } else {
       console.log(`  ✨ GOLDEN CROSS — MA50 above MA200 — looking for SELL signals`);
-      const pos = getPosition(symbol);
-      if (!pos) {
+      openPos = getPosition(symbol);
+      if (!openPos) {
         console.log(`  ℹ️  No open position in ${symbol} — nothing to sell. Skipping.\n`);
         continue;
       }
-      console.log(`  📦 Open position: ${pos.qty} ${symbol} @ avg $${pos.avgPrice?.toFixed(2) ?? "?"}`);
+      console.log(`  📦 Open position: ${openPos.quantity} ${symbol} @ avg $${openPos.avgCost?.toFixed(2) ?? "?"}`);
     }
 
-    // ── Entry condition: RSI(14) hard gate — regime already gated above ──────
-    // BB, StochRSI, Volume — signal strength boosters only, not hard gates
-    const { results, allPass } = runContrarianCheck(price, bias, { rsi14 });
-
-    // ── Signal strength — scales trade size 20%→100% of MAX_TRADE_SIZE_USD ────
-    const { strength, scores: signalScores } = calcSignalStrength(price, bias, {
-      rsi14, bb, stochRsi, volumeRatio, ma50d: ma50, ma200d: ma200, vwapBands,
+    // ── MCC v2 composite entry score (9 indicators, no hard gates) ───────────
+    const { strength, scores: signalScores } = calcEntryScore(price, bias, {
+      rsi14, bb, stochRsi, volumeRatio, ma50, ma200, vwapBands, ema9, ema21, macd, cci,
     });
     const tradeSize = calcTradeSize(strength, CONFIG.maxTradeSizeUSD, CONFIG.portfolioValue);
 
-    console.log("\n── Signal Strength ──────────────────────────────────────\n");
-    const strengthBar = "█".repeat(Math.round(strength * 10)) + "░".repeat(10 - Math.round(strength * 10));
-    console.log(`  Strength: ${(strength * 100).toFixed(0)}%  [${strengthBar}]`);
-    signalScores.forEach(s => console.log(`  • ${s.name.padEnd(12)} ${(s.score * 100).toFixed(0)}%`));
+    logEntryConditions(bias, strength, signalScores);
     console.log(`  Trade size: $${tradeSize.toFixed(2)} (min $${(CONFIG.maxTradeSizeUSD * 0.2).toFixed(2)} → max $${CONFIG.maxTradeSizeUSD})`);
 
     console.log("\n── Decision ─────────────────────────────────────────────\n");
+
+    // For sells: scale quantity by signal strength (30% min → 100% max of position).
+    // For buys: sellQty is null (not applicable).
+    const sellQty = (side === "sell" && openPos?.quantity)
+      ? calcSellSize(strength, openPos.quantity)
+      : null;
 
     const logEntry = {
       timestamp: new Date().toISOString(),
@@ -906,18 +1124,24 @@ async function run() {
         rsi14, stochRsi, volumeRatio, atr14,
         bbLower:    bb         ? bb.lower         : null,
         bbUpper:    bb         ? bb.upper         : null,
+        bbMiddle:   bb         ? bb.middle        : null,
         vwap:       vwapBands  ? vwapBands.vwap   : null,
         vwapLower2: vwapBands  ? vwapBands.lower2 : null,
         vwapUpper2: vwapBands  ? vwapBands.upper2 : null,
-        ma50, ma200,
-        // reference only
-        ema8, rsi3,
+        ma50, ma200, ema9, ema21,
+        macdHistogram:     macd?.histogram     ?? null,
+        macdPrevHistogram: macd?.prevHistogram ?? null,
+        cci,
+        rsi3,
       },
       signalStrength: strength,
       signalScores,
-      conditions: results,
-      allPass,
+      allPass: strength >= 0.30, // MCC v2: composite score is the sole gate
       tradeSize,
+      sellQuantity: sellQty,          // strength-scaled qty (null for buys)
+      sellPct: sellQty && openPos?.quantity
+        ? parseFloat((sellQty / openPos.quantity * 100).toFixed(1))
+        : null,
       orderPlaced: false,
       orderId: null,
       paperTrading: CONFIG.paperTrading,
@@ -928,30 +1152,32 @@ async function run() {
       },
     };
 
-    if (!allPass) {
-      const failed = results.filter((r) => !r.pass).map((r) => r.label);
+    // MCC v2: single gate — composite score ≥ 0.30 (no hard RSI gate)
+    // Backtested: 68.2% WR · PF 1.24 · +$6.31 combined 90-day P&L
+    const MIN_SCORE = 0.30;
+    if (strength < MIN_SCORE) {
       console.log(`🚫 TRADE BLOCKED — ${symbol}`);
-      console.log(`   Failed conditions:`);
-      failed.forEach((f) => console.log(`   - ${f}`));
+      console.log(`   Composite score ${(strength * 100).toFixed(0)}% below minimum ${MIN_SCORE * 100}% — low-conviction setup, skipping.`);
     } else {
       console.log(`✅ ALL CONDITIONS MET — ${symbol}`);
 
       if (CONFIG.paperTrading) {
-        console.log(`\n📋 PAPER TRADE — would ${side.toUpperCase()} ${symbol} ~$${tradeSize.toFixed(2)} at market`);
+        const sellNote = sellQty ? ` (${logEntry.sellPct}% of position = ${sellQty.toFixed(6)} ${symbol.replace("USDT","")})` : "";
+        console.log(`\n📋 PAPER TRADE — would ${side.toUpperCase()} ${symbol} ~$${tradeSize.toFixed(2)} at market${sellNote}`);
         console.log(`   (Set PAPER_TRADING=false in .env to place real orders)`);
         logEntry.orderPlaced = true;
         logEntry.orderId = `PAPER-${Date.now()}`;
-        updatePortfolio(symbol, side, price, tradeSize);
+        updatePortfolio(symbol, side, price, tradeSize, sellQty);
         const snap = await getPortfolioSnapshot(livePrices);
         await sendTelegram(buildTradeMessage(symbol, side, price, tradeSize, logEntry.orderId, true, strength, signalScores, snap));
       } else {
         console.log(`\n🔴 PLACING LIVE ORDER — $${tradeSize.toFixed(2)} ${side.toUpperCase()} ${symbol}`);
         try {
-          const order = await placeCoinbaseOrder(symbol, side, tradeSize, price);
+          const order = await placeCoinbaseOrder(symbol, side, tradeSize, price, sellQty);
           logEntry.orderPlaced = true;
           logEntry.orderId = order.orderId;
           console.log(`✅ ORDER PLACED — ${order.orderId}`);
-          updatePortfolio(symbol, side, price, tradeSize);
+          updatePortfolio(symbol, side, price, tradeSize, sellQty);
           const snap = await getPortfolioSnapshot(livePrices);
           await sendTelegram(buildTradeMessage(symbol, side, price, tradeSize, order.orderId, false, strength, signalScores, snap));
         } catch (err) {
@@ -990,7 +1216,7 @@ const TRADE_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 async function startTradingLoop() {
   console.log(`⏰ Trading loop started — scanning every 10 minutes`);
 
-  // Run immediately on startup, then every 15 minutes
+  // Run immediately on startup, then every 10 minutes
   const tick = () =>
     run().catch((err) => console.error("Trade run error:", err.message));
 

@@ -301,7 +301,10 @@ export async function startCommandPolling() {
   // Register commands with BotFather so the menu only shows real commands
   await registerCommands();
 
-  let offset = getOffset();
+  let offset        = getOffset();
+  let conflictCount = 0;
+  let backoffMs     = 5000;
+
   console.log(`📡 Telegram long-polling started (offset: ${offset})`);
 
   while (true) {
@@ -312,9 +315,33 @@ export async function startCommandPolling() {
       const data = await res.json();
 
       if (!data.ok) {
-        console.log(`⚠️  Telegram getUpdates error: ${data.description}`);
-        await new Promise(r => setTimeout(r, 5000));
+        const isConflict = data.description?.includes("Conflict");
+
+        if (isConflict) {
+          conflictCount++;
+          // Only log every 10th conflict to avoid console spam
+          if (conflictCount === 1) {
+            console.log(`⚠️  Telegram conflict: another bot instance is polling. Commands disabled on this instance.`);
+            console.log(`    → Stop the other instance (Railway / another terminal) to re-enable commands.`);
+          } else if (conflictCount % 10 === 0) {
+            console.log(`⚠️  Telegram conflict ongoing (${conflictCount} retries). Commands still disabled.`);
+          }
+          // Exponential backoff: 5s → 10s → 20s → 40s → 60s max
+          backoffMs = Math.min(backoffMs * 2, 60000);
+        } else {
+          console.log(`⚠️  Telegram getUpdates error: ${data.description}`);
+          backoffMs = 5000; // reset on non-conflict errors
+        }
+
+        await new Promise(r => setTimeout(r, backoffMs));
         continue;
+      }
+
+      // Successful poll — reset conflict state
+      if (conflictCount > 0) {
+        console.log(`✅ Telegram conflict resolved after ${conflictCount} retries. Commands active.`);
+        conflictCount = 0;
+        backoffMs     = 5000;
       }
 
       for (const update of data.result) {

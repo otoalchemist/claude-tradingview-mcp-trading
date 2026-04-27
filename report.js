@@ -27,18 +27,31 @@ function saveState(state) {
   writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
 }
 
-export function updatePortfolio(symbol, side, price, tradeSize) {
+// sellQuantity — if provided, sells that specific amount (partial close);
+//               if null, closes the full position.
+export function updatePortfolio(symbol, side, price, tradeSize, sellQuantity = null) {
   const state = loadState();
   if (side === 'buy') {
     state.cash = Math.max(0, state.cash - tradeSize);
-    if (!state.positions[symbol]) state.positions[symbol] = { quantity: 0, avgCost: 0, totalCost: 0 };
+    if (!state.positions[symbol]) {
+      state.positions[symbol] = { quantity: 0, avgCost: 0, totalCost: 0, entryTime: Date.now() };
+    }
     const pos = state.positions[symbol];
+    if (!pos.entryTime) pos.entryTime = Date.now(); // backfill for existing positions
     pos.quantity  += tradeSize / price;
     pos.totalCost += tradeSize;
     pos.avgCost    = pos.totalCost / pos.quantity;
   } else if (side === 'sell') {
     const pos = state.positions[symbol];
-    if (pos) { state.cash += pos.quantity * price; delete state.positions[symbol]; }
+    if (pos) {
+      const qty = sellQuantity ?? pos.quantity; // partial or full close
+      state.cash   += qty * price;
+      pos.quantity  -= qty;
+      pos.totalCost  = pos.quantity * pos.avgCost; // recalculate remaining cost basis
+      if (pos.quantity <= 1e-8) {
+        delete state.positions[symbol]; // fully closed — remove position
+      }
+    }
   }
   saveState(state);
 }
