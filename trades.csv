@@ -1,2 +1,4 @@
 Date,Time (UTC),Exchange,Symbol,Side,Quantity,Price,Total USD,Fee (est.),Net Amount,Order ID,Mode,Notes
-,,,,,,,,,,,"NOTE","Hey, if you're at this stage of the video, you must be enjoying it... perhaps you could hit subscribe now? :)"
+2026-04-26,23:58:53,Coinbase,BTCUSDT,SELL,0.002564,78657.67,201.70,0.2017,201.50,PAPER-EXIT-1777247933091,PAPER,"Exit: take profit | P&L 0.85%"
+2026-04-26,23:58:54,Coinbase,ETHUSDT,SELL,0.107317,2369.79,254.32,0.2543,254.06,PAPER-EXIT-1777247934283,PAPER,"Exit: take profit | P&L 1.72%"
+2026-04-26,23:58:54,Coinbase,SOLUSDT,SELL,2.313240,86.95,201.14,0.2011,200.94,PAPER-EXIT-1777247934748,PAPER,"Exit: take profit | P&L 0.57%"

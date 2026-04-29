@@ -1,7 +1,7 @@
 // report.js — Portfolio tracking + 4-hour intelligence report
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 
-const SYMBOLS          = (process.env.SYMBOLS || 'BTCUSDT,ETHUSDT,SOLUSDT').split(',').map(s => s.trim());
+const SYMBOLS          = (process.env.SYMBOLS || 'BTCUSDT,ETHUSDT,SOLUSDT,LINKUSDT,DOGEUSDT').split(',').map(s => s.trim());
 const STARTING_CAPITAL = parseFloat(process.env.PORTFOLIO_VALUE_USD || '1000');
 const REPORT_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
 const STATE_FILE = 'portfolio.json';
@@ -11,15 +11,29 @@ const STATE_FILE = 'portfolio.json';
 function loadState() {
   const defaults = {
     startingCapital: STARTING_CAPITAL,
-    cash: STARTING_CAPITAL,
+    legs: { A: { cash: STARTING_CAPITAL * 0.70 }, B: { cash: STARTING_CAPITAL * 0.30 } },
     positions: {},
+    lastExits: {},
     lastReportTime: 0,
     paused: false,
   };
   if (!existsSync(STATE_FILE)) return defaults;
   try {
     const saved = JSON.parse(readFileSync(STATE_FILE, 'utf8'));
-    return { ...defaults, ...saved, positions: saved.positions || {} };
+    // Migrate old flat cash structure
+    if (saved.cash !== undefined && !saved.legs) {
+      saved.legs = {
+        A: { cash: (saved.cash || 0) * 0.70 },
+        B: { cash: (saved.cash || 0) * 0.30 },
+      };
+      delete saved.cash;
+    }
+    return {
+      ...defaults, ...saved,
+      legs: { A: { cash: 0 }, B: { cash: 0 }, ...(saved.legs || {}) },
+      positions: saved.positions || {},
+      lastExits:  saved.lastExits  || {},
+    };
   } catch { return defaults; }
 }
 
@@ -27,29 +41,40 @@ function saveState(state) {
   writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
 }
 
-// sellQuantity — if provided, sells that specific amount (partial close);
-//               if null, closes the full position.
-export function updatePortfolio(symbol, side, price, tradeSize, sellQuantity = null) {
+// updatePortfolio — records a BUY or SELL against the correct leg cash pool.
+// leg      : "A" (trend) or "B" (mean-rev) — required for leg-based cash tracking.
+// atrAtEntry: ATR value stored at buy time, used for live TP calculation.
+// sellQuantity: specific qty to sell (null = full position close).
+export function updatePortfolio(symbol, side, price, tradeSize, sellQuantity = null, leg = 'B', atrAtEntry = 0) {
   const state = loadState();
+  if (!state.legs) state.legs = { A: { cash: 0 }, B: { cash: 0 } };
+
   if (side === 'buy') {
-    state.cash = Math.max(0, state.cash - tradeSize);
+    // Deduct from the leg's cash pool
+    state.legs[leg].cash = Math.max(0, (state.legs[leg].cash || 0) - tradeSize);
     if (!state.positions[symbol]) {
-      state.positions[symbol] = { quantity: 0, avgCost: 0, totalCost: 0, entryTime: Date.now() };
+      state.positions[symbol] = { leg, quantity: 0, avgCost: 0, totalCost: 0, atrAtEntry: atrAtEntry || 0, entryTime: Date.now() };
     }
     const pos = state.positions[symbol];
-    if (!pos.entryTime) pos.entryTime = Date.now(); // backfill for existing positions
+    pos.leg        = leg;
+    pos.atrAtEntry = atrAtEntry || pos.atrAtEntry || 0;
+    if (!pos.entryTime) pos.entryTime = Date.now();
     pos.quantity  += tradeSize / price;
     pos.totalCost += tradeSize;
     pos.avgCost    = pos.totalCost / pos.quantity;
   } else if (side === 'sell') {
     const pos = state.positions[symbol];
     if (pos) {
-      const qty = sellQuantity ?? pos.quantity; // partial or full close
-      state.cash   += qty * price;
+      const posLeg = pos.leg || leg;
+      const qty    = sellQuantity ?? pos.quantity;
+      // Return proceeds to the leg's cash pool
+      state.legs[posLeg].cash = (state.legs[posLeg].cash || 0) + qty * price;
       pos.quantity  -= qty;
-      pos.totalCost  = pos.quantity * pos.avgCost; // recalculate remaining cost basis
+      pos.totalCost  = pos.quantity * pos.avgCost;
       if (pos.quantity <= 1e-8) {
-        delete state.positions[symbol]; // fully closed — remove position
+        delete state.positions[symbol];
+        state.lastExits = state.lastExits || {};
+        state.lastExits[symbol] = Date.now();
       }
     }
   }
@@ -172,115 +197,134 @@ function buildPortfolioSnap(state, prices) {
     );
   }
 
-  const total  = (state.cash || 0) + posValue;
+  const legACash = state.legs?.A?.cash || 0;
+  const legBCash = state.legs?.B?.cash || 0;
+  const totalCash = legACash + legBCash;
+  const total  = totalCash + posValue;
   const net    = total - (state.startingCapital || STARTING_CAPITAL);
   const netPct = ((net / (state.startingCapital || STARTING_CAPITAL)) * 100).toFixed(1);
 
-  return { posValue, unrealizedPnL, total, net, netPct, posLines };
+  return { posValue, unrealizedPnL, total, net, netPct, posLines, legACash, legBCash };
 }
 
-// ─── Session Stats ─────────────────────────────────────────────────────────────
+// ─── Session Stats (E2) ────────────────────────────────────────────────────────
 
 function getSessionStats(log, hoursBack = 4) {
-  const cutoff  = Date.now() - hoursBack * 60 * 60 * 1000;
-  const recent  = log.trades.filter(t => new Date(t.timestamp).getTime() > cutoff);
+  const cutoff   = Date.now() - hoursBack * 60 * 60 * 1000;
+  const recent   = log.trades.filter(t => new Date(t.timestamp).getTime() > cutoff);
   const executed = recent.filter(t => t.orderPlaced);
-  const blocked  = recent.filter(t => !t.orderPlaced);
-
-  const blockerCounts = {};
-  blocked.forEach(t => {
-    (t.conditions || []).filter(c => !c.pass).forEach(c => {
-      blockerCounts[c.label] = (blockerCounts[c.label] || 0) + 1;
-    });
-  });
-  const topBlocker = Object.entries(blockerCounts).sort((a, b) => b[1] - a[1])[0] || null;
-
-  return { recent, executed, blocked, topBlocker, blockerCounts };
+  const failed   = recent.filter(t => !t.orderPlaced && t.error);
+  const entries  = executed.filter(t => t.side === 'buy');
+  const exits    = executed.filter(t => t.side === 'sell');
+  // Realized P&L from exits this window
+  const realizedPnL = exits.reduce((s, t) => s + (t.pnl || 0), 0);
+  return { recent, executed, failed, entries, exits, realizedPnL };
 }
 
 // ─── Trade Performance Analysis ───────────────────────────────────────────────
-// Compare entry prices from recent trades to current prices.
+// For E2: BUY entries show unrealized move vs current price.
+//         SELL exits show realized P&L from the log.
 
 function analysePerformance(executed, prices) {
   const results = [];
   for (const t of executed) {
-    const currentPrice = prices[t.symbol]?.price;
-    if (!currentPrice || !t.price) continue;
-    const pctMove = t.side === 'buy'
-      ? ((currentPrice - t.price) / t.price) * 100
-      : ((t.price - currentPrice) / t.price) * 100;
-    results.push({
-      symbol:    t.symbol.replace('USDT', ''),
-      side:      t.side,
-      entry:     t.price,
-      current:   currentPrice,
-      pctMove,
-      strength:  t.signalStrength || 0,
-      size:      t.tradeSize || 0,
-      regime:    t.regime,
-      timestamp: t.timestamp,
-    });
+    if (t.side === 'buy') {
+      const currentPrice = prices[t.symbol]?.price;
+      if (!currentPrice || !t.price) continue;
+      const pctMove = ((currentPrice - t.price) / t.price) * 100;
+      const tpTarget = t.tpTarget ? parseFloat(t.tpTarget) : null;
+      const pctToTp  = (tpTarget && currentPrice)
+        ? ((tpTarget - currentPrice) / currentPrice * 100).toFixed(1)
+        : null;
+      results.push({
+        symbol:    t.symbol.replace('USDT', ''),
+        side:      'buy',
+        leg:       t.leg || '?',
+        entry:     t.price,
+        current:   currentPrice,
+        pctMove,
+        tpTarget,
+        pctToTp,
+        size:      t.tradeSize || 0,
+        timestamp: t.timestamp,
+      });
+    } else if (t.side === 'sell') {
+      // Realized exit — use logged pnlPct
+      results.push({
+        symbol:    t.symbol.replace('USDT', ''),
+        side:      'sell',
+        leg:       t.leg || '?',
+        entry:     t.entryPrice || t.price,
+        current:   t.price,
+        pctMove:   parseFloat(t.pnlPct || 0),
+        exitReason: t.exitReason || '',
+        pnl:       t.pnl || 0,
+        size:      t.tradeSize || 0,
+        timestamp: t.timestamp,
+      });
+    }
   }
   return results;
 }
 
-// ─── Suggestions Engine ───────────────────────────────────────────────────────
+// ─── Suggestions Engine (E2 Swing Ensemble) ───────────────────────────────────
 
-function generateSuggestions({ perf, stats, fearGreed, global, blockCount, recentAll }) {
+function generateSuggestions({ perf, openPositions, fearGreed, global, prices }) {
   const suggestions = [];
-  const winCount  = perf.filter(t => t.pctMove > 0).length;
-  const lossCount = perf.filter(t => t.pctMove <= 0).length;
-  const winRate   = perf.length > 0 ? (winCount / perf.length) * 100 : null;
 
-  // ── Performance-based ──────────────────────────────────────────────────────
-  if (perf.length === 0 && stats.blocked.length === 0) {
-    suggestions.push('No activity this window. Market is in consolidation — patience is the strategy.');
+  const openEntries  = perf.filter(t => t.side === 'buy');
+  const closedExits  = perf.filter(t => t.side === 'sell');
+
+  // ── Open position health ───────────────────────────────────────────────────
+  if (openEntries.length === 0 && Object.keys(openPositions).length === 0) {
+    suggestions.push('No open positions — bot is hunting for the next 6H Donchian breakout or mean-rev dip. Patience is the correct stance.');
   }
 
-  if (winRate !== null) {
-    if (winRate >= 65) {
-      suggestions.push(`Win rate ${winRate.toFixed(0)}% this window — strategy is dialled in. Hold current settings.`);
-    } else if (winRate >= 45) {
-      suggestions.push(`Win rate ${winRate.toFixed(0)}% — slightly below target. Review whether entries were at RSI extremes or near the 38/62 boundary.`);
-    } else if (winRate < 45) {
-      suggestions.push(`Win rate only ${winRate.toFixed(0)}% — consider waiting for deeper RSI readings (≤34 buys / ≥66 sells) before entering. Thresholds may need tightening in current volatility.`);
+  // Any positions well on their way to TP?
+  const nearTp = openEntries.filter(t => t.pctToTp !== null && parseFloat(t.pctToTp) < 15);
+  if (nearTp.length > 0) {
+    nearTp.forEach(t => {
+      suggestions.push(`${t.symbol} [Leg ${t.leg}] is within ${t.pctToTp}% of its 5×ATR TP target — watch for exit trigger on next 6H close.`);
+    });
+  }
+
+  // Positions moving against us
+  const underwater = openEntries.filter(t => t.pctMove < -3);
+  if (underwater.length > 0) {
+    underwater.forEach(t => {
+      suggestions.push(`${t.symbol} [Leg ${t.leg}] is ${t.pctMove.toFixed(1)}% below entry. E2 has no stop-loss — hold until 10-bar Donchian low exit (Leg A) or TP hit.`);
+    });
+  }
+
+  // ── Recent exits ──────────────────────────────────────────────────────────
+  if (closedExits.length > 0) {
+    const wins   = closedExits.filter(t => t.pnl >= 0);
+    const losses = closedExits.filter(t => t.pnl < 0);
+    if (wins.length > 0) {
+      suggestions.push(`${wins.length} exit(s) closed profitably this window — compounding is working. Check leg cash balances have updated correctly.`);
+    }
+    if (losses.length > 0) {
+      suggestions.push(`${losses.length} exit(s) closed at a loss. For Leg A (Donchian exit), this is expected in choppy markets — wait for the next clear breakout.`);
     }
   }
 
-  // ── High-strength trades underperforming ──────────────────────────────────
-  const highStr = perf.filter(t => t.strength >= 0.6);
-  const highStrLosers = highStr.filter(t => t.pctMove <= 0);
-  if (highStr.length >= 2 && highStrLosers.length / highStr.length > 0.5) {
-    suggestions.push('High-confidence signals are underperforming. Could indicate a trending market overriding mean-reversion — consider temporarily reducing position size by 30%.');
-  }
-
-  // ── Regime context ─────────────────────────────────────────────────────────
-  const deathCrossTrades = recentAll.filter(t => t.regime === 'death_cross');
-  const goldenCrossTrades = recentAll.filter(t => t.regime === 'golden_cross');
-  if (deathCrossTrades.length > goldenCrossTrades.length * 2) {
-    suggestions.push('Most scans are in death cross regime. Be cautious on buy signals if BTC is in a strong downtrend — death crosses on 5m can persist for hours.');
-  } else if (goldenCrossTrades.length > deathCrossTrades.length * 2) {
-    suggestions.push('Consistent golden cross regime. Sell signals have macro tailwind — be more aggressive on high-strength sell setups.');
-  }
-
-  // ── Blocker patterns ──────────────────────────────────────────────────────
-  if (stats.topBlocker) {
-    const [cond, count] = stats.topBlocker;
-    if (count >= 4) {
-      suggestions.push(`"${cond}" has blocked ${count} entries. If this is RSI not reaching threshold, price may be in a slow mean-reversion — patience over chasing.`);
+  // ── Leg A trend context ────────────────────────────────────────────────────
+  // Check if BTC is in GC or DC to give context for Leg A opportunity
+  const btcPrice = prices['BTCUSDT']?.price;
+  if (btcPrice) {
+    if (fearGreed && fearGreed.value >= 70) {
+      suggestions.push(`Fear & Greed at ${fearGreed.value} (${fearGreed.label}) — elevated greed. Leg A (Donchian trend) entries may be chasing extended moves. Leg B mean-rev entries more likely to trigger on pullbacks.`);
+    } else if (fearGreed && fearGreed.value <= 30) {
+      suggestions.push(`Fear & Greed at ${fearGreed.value} (${fearGreed.label}) — fear environment. Leg B mean-rev (RSI ≤30 in death cross) has strongest historical edge in this regime.`);
     }
   }
 
   // ── Fear & Greed context ──────────────────────────────────────────────────
-  if (fearGreed) {
+  if (fearGreed && !btcPrice) {
     if (fearGreed.value <= 20) {
-      suggestions.push(`Fear & Greed at ${fearGreed.value} (${fearGreed.label}). Extreme fear can mean capitulation — buy signals carry higher conviction. Watch for volume spike confirmation.`);
+      suggestions.push(`Extreme fear (${fearGreed.value}/100) — Leg B death-cross dip-buy entries carry highest conviction here. Monitor for RSI ≤30 setups.`);
     } else if (fearGreed.value >= 80) {
-      suggestions.push(`Fear & Greed at ${fearGreed.value} (${fearGreed.label}). Extreme greed = elevated reversal risk. Tighten stops or reduce sell signal sizes — euphoria can extend further than expected.`);
-    } else if (fearGreed.value >= 65) {
-      suggestions.push(`Market sentiment is greedy (${fearGreed.value}). Contrarian sell setups have better macro backing right now.`);
-    } else if (fearGreed.value <= 35) {
-      suggestions.push(`Market sentiment is fearful (${fearGreed.value}). Contrarian buy setups in death cross have higher mean-reversion potential.`);
+      suggestions.push(`Extreme greed (${fearGreed.value}/100) — momentum is strong, favours Leg A Donchian breakouts. Leg B mean-rev entries may see reduced accuracy.`);
     }
   }
 
@@ -288,13 +332,18 @@ function generateSuggestions({ perf, stats, fearGreed, global, blockCount, recen
   if (global) {
     const capChange = parseFloat(global.marketCapChange24h);
     if (capChange <= -5) {
-      suggestions.push(`Total crypto market cap down ${Math.abs(capChange)}% in 24h. Consider pausing sell signals until market finds support — sharp drops can continue.`);
+      suggestions.push(`Broad crypto market down ${Math.abs(capChange)}% in 24h. Strong downtrend — Leg A trend entries unlikely; Leg B DC dip-buy (RSI ≤30) is the primary signal to watch.`);
     } else if (capChange >= 5) {
-      suggestions.push(`Total crypto market cap up ${capChange}% in 24h. Strong rally — buy signals may face resistance near highs, be selective.`);
+      suggestions.push(`Broad crypto market up ${capChange}% in 24h — bullish momentum. Leg A Donchian breakouts most likely to fire. Watch for confirmed 6H closes above 20-bar highs.`);
     }
   }
 
-  return suggestions.length > 0 ? suggestions : ['Strategy appears balanced. Continue monitoring.'];
+  // ── E2 scan cadence reminder ───────────────────────────────────────────────
+  if (openEntries.length === 0 && closedExits.length === 0) {
+    suggestions.push('E2 scans every 6H. Signals are infrequent by design (~40-48/yr) — quality over quantity. The next potential entry fires at the next 6H candle close.');
+  }
+
+  return suggestions.length > 0 ? suggestions : ['Strategy running normally. No specific actions needed this window.'];
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -345,7 +394,7 @@ export async function generateReport(log) {
   const stats = getSessionStats(log, 4);
 
   // Trade performance vs current price
-  const perf = analysePerformance(stats.executed, prices);
+  const perf    = analysePerformance(stats.executed, prices);
   const winners = perf.filter(t => t.pctMove > 0);
   const losers  = perf.filter(t => t.pctMove <= 0);
 
@@ -353,11 +402,13 @@ export async function generateReport(log) {
   const today = now.toISOString().slice(0, 10);
   const todayTrades = log.trades.filter(t => t.timestamp.startsWith(today) && t.orderPlaced);
 
-  // Suggestions
+  // Suggestions (E2-aware)
   const suggestions = generateSuggestions({
-    perf, stats, fearGreed, global,
-    blockCount: stats.blocked.length,
-    recentAll:  stats.recent,
+    perf,
+    openPositions: state.positions || {},
+    fearGreed,
+    global,
+    prices,
   });
 
   // ── News dedup + combine ───────────────────────────────────────────────────
@@ -399,10 +450,11 @@ export async function generateReport(log) {
   push('');
 
   // ── Portfolio ──────────────────────────────────────────────────────────────
-  push(`<b>💰 PORTFOLIO</b>`);
+  push(`<b>💰 PORTFOLIO  (E2 Ensemble)</b>`);
   push(
     `  Starting capital: $${(state.startingCapital || STARTING_CAPITAL).toFixed(2)}`,
-    `  USDC cash:        $${(state.cash || 0).toFixed(2)}`,
+    `  Leg A cash (70%): $${snap.legACash.toFixed(2)}  ← Donchian-GC trend`,
+    `  Leg B cash (30%): $${snap.legBCash.toFixed(2)}  ← Mean-rev contrarian`,
     `  Open positions:   $${snap.posValue.toFixed(2)}`,
     `  Total value:      $${snap.total.toFixed(2)}`,
     `  Unrealized P&amp;L: ${snap.unrealizedPnL >= 0 ? '+' : ''}$${snap.unrealizedPnL.toFixed(2)}`,
@@ -416,58 +468,60 @@ export async function generateReport(log) {
 
   // ── Session recap ──────────────────────────────────────────────────────────
   push(`<b>📋 SESSION — last 4h</b>`);
+  const pnlStr = stats.realizedPnL !== 0
+    ? `  |  Realized: ${stats.realizedPnL >= 0 ? '+' : ''}$${stats.realizedPnL.toFixed(2)}`
+    : '';
   push(
-    `  Scans: ${stats.recent.length}  |  Trades: ${stats.executed.length}  |  Blocked: ${stats.blocked.length}`,
+    `  Entries: ${stats.entries.length}  |  Exits: ${stats.exits.length}${pnlStr}` +
+    (stats.failed.length > 0 ? `  |  ⚠️ Failed: ${stats.failed.length}` : ''),
     `  Today total: ${todayTrades.length} trade(s)`,
   );
   push('');
 
   // ── What went right ────────────────────────────────────────────────────────
   push(`<b>✅ WHAT WENT RIGHT</b>`);
-  if (winners.length > 0) {
-    winners.forEach(t => {
-      push(`  • ${t.symbol} ${t.side.toUpperCase()}: entry ${fmtPrice(t.entry)} → ${fmtPrice(t.current)}  (${fmtPct(t.pctMove)})  signal ${Math.round(t.strength * 100)}%`);
+  const openWinners = winners.filter(t => t.side === 'buy');
+  const closedWins  = winners.filter(t => t.side === 'sell');
+  if (closedWins.length > 0) {
+    closedWins.forEach(t => {
+      push(`  • ${t.symbol} [Leg ${t.leg}] EXIT: ${fmtPct(t.pctMove)} realized  (${t.exitReason?.replace(/_/g,' ') || 'exit'})`);
     });
-  } else if (stats.executed.length === 0) {
-    push('  • No trades fired this window — filters avoided low-quality setups.');
-    // Check if market went against us (good that we didn't trade)
-    const anyBigMoves = Object.values(prices).some(p => Math.abs(p.change24h) > 3);
-    if (anyBigMoves) push('  • Market had large moves (+/-3%+) — staying disciplined during volatility is a win.');
-  } else {
-    push('  • No open positions from this window are currently profitable.');
   }
-  if (stats.blocked.length === 0 && stats.executed.length === 0) {
-    push('  • Strategy correctly silent in low-signal environment.');
+  if (openWinners.length > 0) {
+    openWinners.forEach(t => {
+      const tpNote = t.pctToTp ? `  ${t.pctToTp}% to TP` : '';
+      push(`  • ${t.symbol} [Leg ${t.leg}] open: entry ${fmtPrice(t.entry)} → ${fmtPrice(t.current)}  (${fmtPct(t.pctMove)}${tpNote})`);
+    });
+  }
+  if (stats.entries.length === 0 && stats.exits.length === 0) {
+    push('  • No signals this window — E2 correctly quiet in the absence of 6H Donchian breakouts or RSI extremes.');
+    const anyBigMoves = Object.values(prices).some(p => Math.abs(p.change24h) > 3);
+    if (anyBigMoves) push('  • Market volatile (+/-3%+) but no qualifying setups — avoiding noise is a win.');
+  }
+  if (winners.length === 0 && stats.executed.length > 0) {
+    push('  • Entries placed but not yet at profit — hold until TP or Donchian exit triggers.');
   }
   push('');
 
   // ── What went wrong ────────────────────────────────────────────────────────
   push(`<b>❌ WHAT WENT WRONG</b>`);
-  if (losers.length > 0) {
-    losers.forEach(t => {
-      push(`  • ${t.symbol} ${t.side.toUpperCase()}: entry ${fmtPrice(t.entry)} → ${fmtPrice(t.current)}  (${fmtPct(t.pctMove)})  signal ${Math.round(t.strength * 100)}%`);
+  const openLosers   = losers.filter(t => t.side === 'buy');
+  const closedLosses = losers.filter(t => t.side === 'sell');
+  if (closedLosses.length > 0) {
+    closedLosses.forEach(t => {
+      push(`  • ${t.symbol} [Leg ${t.leg}] EXIT at loss: ${fmtPct(t.pctMove)}  (${t.exitReason?.replace(/_/g,' ') || 'exit'})`);
     });
   }
-  // Missed moves (blocked trades where price went our way)
-  const missedMoves = [];
-  for (const t of stats.blocked) {
-    const cp = prices[t.symbol]?.price;
-    if (!cp || !t.price) continue;
-    const wouldHaveBeen = t.side === 'buy'
-      ? ((cp - t.price) / t.price) * 100
-      : ((t.price - cp) / t.price) * 100;
-    if (wouldHaveBeen > 0.5) {
-      missedMoves.push({ symbol: t.symbol.replace('USDT',''), side: t.side, pct: wouldHaveBeen, cond: (t.conditions || []).find(c => !c.pass)?.label || '?' });
-    }
-  }
-  if (missedMoves.length > 0) {
-    push(`  ⚠️ Missed moves (blocked but would have profited):`);
-    missedMoves.slice(0, 3).forEach(m => {
-      push(`    • ${m.symbol} ${m.side.toUpperCase()}: blocked by "${m.cond}" — would be ${fmtPct(m.pct)}`);
+  if (openLosers.length > 0) {
+    openLosers.forEach(t => {
+      push(`  • ${t.symbol} [Leg ${t.leg}] currently ${fmtPct(t.pctMove)}: entry ${fmtPrice(t.entry)} → ${fmtPrice(t.current)}  — awaiting TP or exit signal`);
     });
   }
-  if (losers.length === 0 && missedMoves.length === 0) {
-    push('  • No significant errors this window.');
+  if (stats.failed.length > 0) {
+    push(`  ⚠️ ${stats.failed.length} order(s) failed to place — check Coinbase API logs.`);
+  }
+  if (losers.length === 0 && stats.failed.length === 0) {
+    push('  • No errors or losing positions this window.');
   }
   push('');
 

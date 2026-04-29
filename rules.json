@@ -1,66 +1,55 @@
 {
-  "watchlist": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
-  "default_timeframe": "5m",
-  "default_view": "5D",
-
   "strategy": {
-    "name": "Contrarian Golden/Death Cross (TradingView-matched)",
-    "description": "Matches the TradingView 'Contrarian G/D Cross' indicator exactly. Uses the 5m MA50/MA200 cross to define the regime, then fades the trend — buying RSI(14) exhaustion (≤38) in death cross regimes and selling RSI(14) exhaustion (≥62) in golden cross regimes. StochRSI, BB, Volume, and VWAP are signal strength boosters only — they scale position size but never block a trade.",
-    "approach": "contrarian / mean-reversion",
-    "timeframe": "5-minute candles, 5-day view"
+    "name": "E2 Swing Ensemble — Donchian-GC Trend + Hybrid Mean-Rev",
+    "version": "E2",
+    "timeframe": "6-hour candles",
+    "description": "Two-leg ensemble on 6h candles. Leg A (70%) follows Donchian-20 breakouts in golden cross. Leg B (30%) buys RSI-oversold dips in death cross or GC pullbacks. Each leg compounds independently — trade size = 50% of leg equity.",
+    "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "LINKUSDT"],
+    "backtested": "3.2yr · +60% return · 33.6% max DD · ratio 1.79 · ~48 trades/yr"
+  },
+
+  "legs": {
+    "A": {
+      "name": "Donchian-GC Trend",
+      "capital_pct": 70,
+      "entry": "Last completed 6h close > 20-bar Donchian high AND EMA50 > EMA200 (golden cross) AND close > EMA50",
+      "exit": "Last completed 6h close < 10-bar Donchian low  OR  live price >= entry + 5×ATR(14)",
+      "sizing": "50% of Leg A current equity (cash + open positions MTM) — compounds automatically"
+    },
+    "B": {
+      "name": "Hybrid Mean-Reversion Contrarian",
+      "capital_pct": 30,
+      "entry_death_cross": "EMA50 < EMA200 AND RSI(14) ≤ 30  — contrarian death-cross dip-buy",
+      "entry_golden_cross": "EMA50 > EMA200 AND close < EMA50 AND RSI(14) ≤ 45  — GC pullback re-entry",
+      "exit": "Live price >= entry + 5×ATR(14)",
+      "sizing": "50% of Leg B current equity (cash + open positions MTM) — compounds automatically"
+    }
   },
 
   "indicators": {
-    "regime_5m_ma50_ma200": "MA50 vs MA200 calculated on 5-minute candles — 5-day view. MA50 on 5m = 50×5min = ~4.2 hours. MA200 on 5m = 200×5min = ~16.7 hours. Death cross (MA50 < MA200) = buy regime. Golden cross (MA50 > MA200) = sell regime.",
-    "rsi_14": "RSI over 14 periods — standard setting, matches TradingView indicator. Below 38 = oversold (buy signal in death cross). Above 62 = overbought (sell signal in golden cross). Asymmetric thresholds centred around 50 with equal margins.",
-    "bollinger_bands": "20-period BB with 2 standard deviations. Signal strength BOOSTER only — not a hard gate. Price at/beyond lower/upper band increases position size.",
-    "stoch_rsi": "Stochastic RSI (14,14,3,3). Signal strength BOOSTER only — not a hard gate. Below 50 on bullish / above 50 on bearish adds confirmation weight.",
-    "volume_booster": "Volume is a SIGNAL STRENGTH BOOSTER, not a gate. High volume (≥1.5x avg) on an oversold condition = higher confidence = larger position size. Low volume = smaller size but trade still valid.",
-    "vwap_bands": "VWAP with ±1σ and ±2σ bands anchored to session start. Price at ±2σ VWAP band = institutionally significant exhaustion level. Used as strength booster.",
-    "atr_14": "ATR(14) on 5m candles for dynamic stop placement. Stop = 1.5x ATR from entry. Scales with actual volatility rather than fixed %."
+    "EMA50":       "Exponential moving average of last 50 completed 6h closes (~12.5 days). Trend filter and pullback reference.",
+    "EMA200":      "Exponential moving average of last 200 completed 6h closes (~50 days). Regime baseline.",
+    "RSI_14":      "RSI over 14 periods on 6h closes. ≤30 = oversold (Leg B death-cross entry). ≤45 = pullback (Leg B GC entry).",
+    "ATR_14":      "Average True Range over 14 completed 6h candles. Used to size take-profit: entry + 5×ATR.",
+    "Donchian_20": "Highest high of the 20 completed 6h bars before the current bar. Leg A breakout trigger.",
+    "Donchian_10": "Lowest low of the 10 completed 6h bars before the current bar. Leg A trailing exit."
   },
 
   "regime": {
-    "source": "5-minute candles — MA50 vs MA200 on the 5-day/5m chart (matches TradingView 5D view)",
-    "death_cross": "MA50 (5m) is below MA200 (5m) — short-term bearish. Bot looks for BUY signals only (contrarian: fade oversold dips).",
-    "golden_cross": "MA50 (5m) is above MA200 (5m) — short-term bullish. Bot looks for SELL signals only (contrarian: fade overbought exhaustion)."
+    "golden_cross": "EMA50 > EMA200 — uptrend confirmed. Leg A looks for Donchian breakouts. Leg B looks for pullbacks (RSI ≤ 45 below EMA50).",
+    "death_cross":  "EMA50 < EMA200 — downtrend confirmed. Leg A dormant (no breakout entries). Leg B looks for oversold bounces (RSI ≤ 30)."
   },
 
-  "entry_rules": {
-    "long": [
-      "REGIME: 5m MA50 below 5m MA200 (death cross — looking for BUY signals only)",
-      "RSI(14) at or below 38 — oversold on 5m timeframe (matches TradingView indicator)"
-    ],
-    "short": [
-      "REGIME: 5m MA50 above 5m MA200 (golden cross — looking for SELL signals only)",
-      "RSI(14) at or above 62 — overbought on 5m timeframe (matches TradingView indicator)"
-    ],
-    "note": "Only 2 hard gates: Regime + RSI(14). Everything else (BB, StochRSI, Volume, VWAP) is a signal strength booster that scales position size from 20% to 100% of MAX_TRADE_SIZE_USD."
+  "risk_management": {
+    "max_concurrent_per_leg": 2,
+    "tp_multiplier": "5×ATR from entry price",
+    "stop_loss": "None — Donchian-10 low acts as trailing exit for Leg A. Leg B exits only on TP.",
+    "compounding": "Trade size = 50% of leg equity. As profits accumulate, trade sizes grow proportionally.",
+    "fees": "0.60% Coinbase taker fee baked into backtest. Round-trip cost ~1.2% per trade."
   },
 
-  "signal_strength_boosters": [
-    "RSI(14) depth — deeper below 38 (buys) or above 62 (sells) = larger position",
-    "BB position — price at/beyond lower/upper band adds confidence",
-    "StochRSI below 50 (buys) / above 50 (sells) adds timing confirmation",
-    "Volume ≥ 1.0x average — capitulation confirmed, increases position size",
-    "Price at VWAP ±2σ band — institutional-grade exhaustion level, increases position size",
-    "Deeper regime separation (MA50 vs MA200 gap) — stronger macro conviction, increases position size"
-  ],
-
-  "exit_rules": [
-    "Primary: Price reverts to Bollinger Band middle (20-period SMA) — mean reversion target hit",
-    "Stop loss: 1.5x ATR(14) below entry for longs, above entry for shorts — dynamic, volatility-scaled",
-    "Time stop: If position not at target within 15 candles (75 minutes on 5m), exit — it's become a trend not a reversion",
-    "Take profit: 2.5x ATR(14) from entry for full exit"
-  ],
-
-  "risk_rules": [
-    "Maximum trade size capped by MAX_TRADE_SIZE_USD in .env — scales 20%-100% with signal strength",
-    "Maximum trades per day capped by MAX_TRADES_PER_DAY in .env",
-    "Volume acts as position sizer, not a blocker — low volume = smaller size, high volume = full size",
-    "Spot trading only: shorts require holding the asset; buys only in death cross regime",
-    "Paper trade first — validate fill quality and slippage before going live"
-  ],
-
-  "notes": "Matches TradingView 'Contrarian G/D Cross' indicator exactly. Key design decisions: (1) 5m MA50/MA200 for regime — same chart as entry signals. (2) RSI(14) at 38/62 — standard period, asymmetric thresholds centred at 50. (3) StochRSI/BB/Volume are boosters only — they scale size, never block a trade. (4) ATR-based stops scale with actual volatility. (5) 15-candle time stop prevents trend-fighting."
+  "scan_schedule": {
+    "full_scan": "Every 6 hours — fetches candle data, checks exits + entries",
+    "quick_exit": "Every 1 hour — checks live prices against stored TP levels (catches intrabar TP hits)"
+  }
 }

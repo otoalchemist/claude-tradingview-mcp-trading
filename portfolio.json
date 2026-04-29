@@ -1,24 +1,12 @@
 {
-  "startingCapital": 1000,
-  "cash": 350,
-  "positions": {
-    "BTCUSDT": {
-      "quantity": 0.00256427,
-      "avgCost": 77995.12,
-      "totalCost": 200
-    },
-    "ETHUSDT": {
-      "quantity": 0.10731670,
-      "avgCost": 2329.80,
-      "totalCost": 250
-    },
-    "SOLUSDT": {
-      "quantity": 2.31324,
-      "avgCost": 86.46,
-      "totalCost": 200
-    }
+  "startingCapital": 1163.14,
+  "legs": {
+    "A": { "cash": 0 },
+    "B": { "cash": 0 }
   },
-  "lastReportTime": 1777183623075,
-  "lastUpdateId": 808902002,
-  "paused": false
+  "positions": {},
+  "lastExits": {},
+  "lastReportTime": 0,
+  "paused": false,
+  "_note": "Baselined 2026-04-28. USD cash $1163.14 after selling BTC/ETH. reconcilePortfolioWithCoinbase() sets leg cash (A=$814.20, B=$348.94) on startup. AKT/WLUNA outside bot scope."
 }
