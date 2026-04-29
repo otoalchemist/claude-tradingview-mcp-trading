@@ -716,9 +716,10 @@ async function reconcilePortfolioWithCoinbase() {
   console.log("\n🔄 Reconciling portfolio.json with Coinbase...");
 
   try {
-    const path = "/api/v3/brokerage/accounts";
-    const res  = await fetch(`https://api.coinbase.com${path}`, {
-      headers: { Authorization: `Bearer ${buildCoinbaseJWT("GET", path)}` },
+    // Use limit=250 — without it the fiat USD account is omitted from the response
+    const basePath = "/api/v3/brokerage/accounts";
+    const res  = await fetch(`https://api.coinbase.com${basePath}?limit=250`, {
+      headers: { Authorization: `Bearer ${buildCoinbaseJWT("GET", basePath)}` },
     });
     if (!res.ok) { console.log("  ⚠️  Coinbase accounts fetch failed"); return; }
     const accounts = (await res.json()).accounts || [];
