@@ -94,6 +94,7 @@ export function markReportSent() {
 // ─── Market Data ──────────────────────────────────────────────────────────────
 
 function toCbSymbol(s) {
+  if (s.includes('-'))    return s;
   if (s.endsWith('USDT')) return s.slice(0, -4) + '-USD';
   if (s.endsWith('USD'))  return s.slice(0, -3) + '-USD';
   return s;

@@ -37,6 +37,8 @@
 import "dotenv/config";
 import { isPaused, startCommandPolling } from "./telegram.js";
 import { updatePortfolio, shouldSendReport, markReportSent, generateReport } from "./report.js";
+import { calcEMA, calcRSI, calcATR, calcDonchianHigh, calcDonchianLow } from "./indicators.js";
+import { getLegEquity, legPositionCount, toCoinbaseSymbol } from "./portfolioUtils.js";
 import { readFileSync, writeFileSync, existsSync, appendFileSync } from "fs";
 import crypto from "crypto";
 
@@ -134,12 +136,6 @@ const CB_GRANULARITY = {
 };
 const CB_MAX_PER_PAGE = 350;
 
-function toCoinbaseSymbol(symbol) {
-  if (symbol.endsWith("USDT")) return symbol.slice(0, -4) + "-USD";
-  if (symbol.endsWith("USD"))  return symbol.slice(0, -3) + "-USD";
-  return symbol;
-}
-
 async function fetchCandles(symbol, interval, limit = 250) {
   const cbSymbol = toCoinbaseSymbol(symbol);
   const { gran, secs } = CB_GRANULARITY[interval] || CB_GRANULARITY["6H"];
@@ -185,58 +181,10 @@ async function getCurrentPrice(symbol) {
 }
 
 // ─── Indicators ───────────────────────────────────────────────────────────────
-
-function calcEMA(closes, period) {
-  if (closes.length < period) return null;
-  const k = 2 / (period + 1);
-  let ema  = closes.slice(0, period).reduce((a, b) => a + b, 0) / period;
-  for (let i = period; i < closes.length; i++) ema = closes[i] * k + ema * (1 - k);
-  return ema;
-}
-
-function calcRSI(closes, period = 14) {
-  if (closes.length < period + 1) return null;
-  let gains = 0, losses = 0;
-  for (let i = closes.length - period; i < closes.length; i++) {
-    const diff = closes[i] - closes[i - 1];
-    if (diff > 0) gains += diff; else losses -= diff;
-  }
-  const avgGain = gains / period, avgLoss = losses / period;
-  if (avgLoss === 0) return 100;
-  return 100 - 100 / (1 + avgGain / avgLoss);
-}
-
-function calcATR(candles, period = 14) {
-  if (candles.length < period + 1) return null;
-  const trs = [];
-  for (let i = candles.length - period; i < candles.length; i++) {
-    const h = candles[i].high, l = candles[i].low, pc = candles[i - 1].close;
-    trs.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
-  }
-  return trs.reduce((a, b) => a + b, 0) / period;
-}
-
-// Donchian highest high of the `period` bars ending before the LAST bar.
-// (Replicates backtest: entry bar's close vs previous period's Donchian high.)
-function calcDonchianHigh(candles, period) {
-  if (candles.length < period + 1) return null;
-  const slice = candles.slice(-period - 1, -1);
-  return Math.max(...slice.map(c => c.high));
-}
-
-// Donchian lowest low of the `period` bars ending before the LAST bar.
-function calcDonchianLow(candles, period) {
-  if (candles.length < period + 1) return null;
-  const slice = candles.slice(-period - 1, -1);
-  return Math.min(...slice.map(c => c.low));
-}
+// Imported from indicators.js (see that file for implementations).
 
 // ─── Portfolio State ───────────────────────────────────────────────────────────
-// Reads / writes portfolio.json.
-// Structure:
-//   legs.A.cash — cash available to Leg A (trend)
-//   legs.B.cash — cash available to Leg B (mean-rev)
-//   positions[sym] — { leg, quantity, avgCost, totalCost, atrAtEntry, entryTime }
+// getLegEquity and legPositionCount imported from portfolioUtils.js.
 
 function loadPortfolio() {
   const defaults = {
@@ -279,22 +227,6 @@ function loadPortfolio() {
 
 function savePortfolio(state) {
   writeFileSync("portfolio.json", JSON.stringify(state, null, 2));
-}
-
-/** Current equity of a leg = leg cash + mark-to-market of its open positions. */
-function getLegEquity(state, leg, livePrices = {}) {
-  let equity = state.legs[leg]?.cash || 0;
-  for (const [sym, pos] of Object.entries(state.positions)) {
-    if (pos.leg !== leg) continue;
-    const price = livePrices[sym] || pos.avgCost || 0;
-    equity += pos.quantity * price;
-  }
-  return equity;
-}
-
-/** Count open positions for a leg. */
-function legPositionCount(state, leg) {
-  return Object.values(state.positions).filter(p => p.leg === leg).length;
 }
 
 // ─── Coinbase JWT & Order ─────────────────────────────────────────────────────
@@ -591,9 +523,11 @@ async function scanEntries() {
     console.log(`  TP from here: $${tpFromHere}  (+${((CONFIG.tpAtrMult * atr14) / price * 100).toFixed(1)}%)`);
 
     // ── Leg A: Donchian-GC Trend ─────────────────────────────────────────
-    const alreadyInA = state.positions[symbol]?.leg === "A";
-    const legAFull   = legPositionCount(state, "A") >= CONFIG.maxConcurPerLeg;
-    const legAEntry  = !alreadyInA && !legAFull
+    // Guard against any existing position (either leg) — positions[sym] is a
+    // single-slot structure and cannot represent two legs simultaneously.
+    const alreadyHeld = !!state.positions[symbol];
+    const legAFull    = legPositionCount(state, "A") >= CONFIG.maxConcurPerLeg;
+    const legAEntry   = !alreadyHeld && !legAFull
       && inGC
       && don20H !== null && price > don20H + 0.5 * atr14  // ATR buffer: filters fake breakouts
       && price > ema50;
@@ -608,17 +542,18 @@ async function scanEntries() {
       Object.assign(state, loadPortfolio());
     } else {
       const atrThreshold = don20H !== null ? don20H + 0.5 * atr14 : null;
-      const legABlockReason = alreadyInA ? "already in position" : legAFull ? "leg A full (10/10)" : !inGC ? "not in golden cross" : don20H === null || price <= don20H ? `price ${price.toFixed(0)} ≤ don20H ${don20H?.toFixed(0)}` : atrThreshold !== null && price <= atrThreshold ? `price ${price.toFixed(0)} ≤ don20H+0.5ATR ${atrThreshold?.toFixed(0)}` : "price ≤ EMA50";
+      const legABlockReason = alreadyHeld ? "already in position" : legAFull ? "leg A full (10/10)" : !inGC ? "not in golden cross" : don20H === null || price <= don20H ? `price ${price.toFixed(0)} ≤ don20H ${don20H?.toFixed(0)}` : atrThreshold !== null && price <= atrThreshold ? `price ${price.toFixed(0)} ≤ don20H+0.5ATR ${atrThreshold?.toFixed(0)}` : "price ≤ EMA50";
       console.log(`  ⏸ Leg A: skip (${legABlockReason})`);
     }
 
     // ── Leg B: Hybrid Mean-Reversion ─────────────────────────────────────
-    const alreadyInB = state.positions[symbol]?.leg === "B";
     const legBFull   = legPositionCount(state, "B") >= CONFIG.maxConcurPerLeg;
     let legBEntry = false;
     let legBReason = "";
 
-    if (!alreadyInB && !legBFull && rsi14 !== null) {
+    // Reload alreadyHeld in case Leg A just entered this symbol
+    const alreadyHeldB = !!state.positions[symbol];
+    if (!alreadyHeldB && !legBFull && rsi14 !== null) {
       if (!inGC && rsi14 <= 30) {
         legBEntry  = true;
         legBReason = `death cross + RSI ${rsi14.toFixed(1)} ≤ 30`;
@@ -636,7 +571,7 @@ async function scanEntries() {
       await placeEntry(symbol, "B", tradeSize, price, atr14, state, livePrices);
       Object.assign(state, loadPortfolio());
     } else {
-      const legBBlockReason = alreadyInB ? "already in position" : legBFull ? "leg B full (2/2)" : rsi14 === null ? "RSI not ready" : `RSI ${rsi14.toFixed(1)} — no signal`;
+      const legBBlockReason = alreadyHeldB ? "already in position" : legBFull ? "leg B full (10/10)" : rsi14 === null ? "RSI not ready" : `RSI ${rsi14.toFixed(1)} — no signal`;
       console.log(`  ⏸ Leg B: skip (${legBBlockReason})`);
     }
 
