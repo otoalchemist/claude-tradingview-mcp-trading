@@ -1,4 +1,48 @@
 .env
 *.log
 safety-check-log.json
+safety-check-log-archive.json
 node_modules/
+
+# Screenshots
+*.png
+
+# TradingView browser automation scripts (not part of bot)
+tv-*.mjs
+cdp-*.mjs
+
+# Old/experimental backtest scripts
+backtest-15m-strategies.mjs
+backtest-akt.mjs
+backtest-alt-strategies.mjs
+backtest-ensemble.mjs
+backtest-exit-tf.mjs
+backtest-exits.mjs
+backtest-freq-boost.mjs
+backtest-frequent-akt.mjs
+backtest-frequent-swing.mjs
+backtest-high-thr.mjs
+backtest-higher-freq.mjs
+backtest-improvements.mjs
+backtest-lak.mjs
+backtest-momentum.mjs
+backtest-multi-tune.mjs
+backtest-portfolio-exits.mjs
+backtest-results.json
+backtest-sl.mjs
+backtest-sweep.mjs
+backtest-swing.mjs
+backtest-tf-akt-compare.mjs
+backtest-tier2.mjs
+backtest-tier3.mjs
+backtest-timeframes.mjs
+backtest-tp.mjs
+backtest-volatile.mjs
+backtest-vs-buyhold.mjs
+
+# TradingView Pine scripts and text dumps
+*.pine
+pine-*.txt
+strategy-report-*.txt
+tg-offset.json
+trades-archive.csv

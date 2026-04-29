@@ -4,7 +4,7 @@
  * TWO-LEG ENSEMBLE STRATEGY
  * ─────────────────────────
  * Leg A — Donchian-GC Trend (70% of portfolio equity)
- *   Entry : last completed 6h close > 20-bar Donchian high
+ *   Entry : last completed 6h close > 20-bar Donchian high + 0.5×ATR  ← ATR buffer filters fake breakouts
  *           AND EMA50 > EMA200 (golden cross)
  *           AND close > EMA50
  *   Exit  : last completed 6h close < 10-bar Donchian low
@@ -16,8 +16,9 @@
  *   Exit  : live price ≥ entry + 5×ATR
  *
  * COMPOUNDING SIZING
- *   Trade size = 50% of leg's current equity (cash + open positions MTM).
+ *   Trade size = 10% of leg's current equity (cash + open positions MTM).
  *   As the portfolio grows, each trade grows proportionally — automatic compounding.
+ *   Max 10 concurrent positions per leg.
  *
  * PORTFOLIO STRUCTURE (portfolio.json)
  *   legs.A.cash  — cash available to Leg A
@@ -28,8 +29,9 @@
  * SCAN SCHEDULE
  *   Full scan (exits + entries): every 6 hours
  *   Quick live-price TP check:   every 1 hour  (catches intrabar TP hits)
+ *   4-hour report:               independent timer, never tied to trade events
  *
- * Symbols: BTC, ETH, SOL, LINK · 0.60% Coinbase taker fees · Max 2 concurrent/leg
+ * Symbols: BTC, ETH, SOL, LINK, DOGE · 0.60% Coinbase taker fees
  */
 
 import "dotenv/config";
@@ -49,8 +51,8 @@ const CONFIG = {
   // E2 parameters
   legASplit: 0.70,    // 70% to Donchian-GC trend leg
   legBSplit: 0.30,    // 30% to hybrid mean-rev leg
-  sizingPct: 0.50,    // 50% of leg equity per trade
-  maxConcurPerLeg: 2, // max open positions per leg
+  sizingPct: 0.10,    // 10% of leg equity per trade
+  maxConcurPerLeg: 10, // max open positions per leg
   tpAtrMult: 5,       // 5×ATR take-profit for both legs
   telegram: {
     token:  process.env.TELEGRAM_BOT_TOKEN,
@@ -577,7 +579,8 @@ async function scanEntries() {
     }
 
     const inGC = ema50 > ema200;
-    const fmt  = v => v != null ? v.toFixed(2) : "N/A";
+    // Robust formatter — won't crash if a non-numeric value slips through
+    const fmt  = v => (v != null && typeof v === "number" && isFinite(v)) ? v.toFixed(2) : String(v ?? "N/A");
     const regimeLabel = inGC ? "✨ GOLDEN CROSS" : "☠️  DEATH CROSS";
 
     console.log(`  EMA50: $${fmt(ema50)}  EMA200: $${fmt(ema200)}  → ${regimeLabel}`);
@@ -592,7 +595,7 @@ async function scanEntries() {
     const legAFull   = legPositionCount(state, "A") >= CONFIG.maxConcurPerLeg;
     const legAEntry  = !alreadyInA && !legAFull
       && inGC
-      && don20H !== null && price > don20H
+      && don20H !== null && price > don20H + 0.5 * atr14  // ATR buffer: filters fake breakouts
       && price > ema50;
 
     if (legAEntry) {
@@ -604,7 +607,8 @@ async function scanEntries() {
       // Reload state after entry
       Object.assign(state, loadPortfolio());
     } else {
-      const legABlockReason = alreadyInA ? "already in position" : legAFull ? "leg A full (2/2)" : !inGC ? "not in golden cross" : don20H === null || price <= don20H ? `price ${price.toFixed(0)} ≤ don20H ${don20H?.toFixed(0)}` : "price ≤ EMA50";
+      const atrThreshold = don20H !== null ? don20H + 0.5 * atr14 : null;
+      const legABlockReason = alreadyInA ? "already in position" : legAFull ? "leg A full (10/10)" : !inGC ? "not in golden cross" : don20H === null || price <= don20H ? `price ${price.toFixed(0)} ≤ don20H ${don20H?.toFixed(0)}` : atrThreshold !== null && price <= atrThreshold ? `price ${price.toFixed(0)} ≤ don20H+0.5ATR ${atrThreshold?.toFixed(0)}` : "price ≤ EMA50";
       console.log(`  ⏸ Leg A: skip (${legABlockReason})`);
     }
 
@@ -852,7 +856,13 @@ async function startTradingLoop() {
       const scanState = loadPortfolio();
       scanState.lastScanTime = new Date().toISOString();
       savePortfolio(scanState);
+    } catch (err) { console.error("Scan error:", err.message); }
+    setTimeout(tick, SCAN_INTERVAL_MS);
+  };
 
+  // 4-hour report — independent timer, never tied to trade events
+  const reportTick = async () => {
+    try {
       if (shouldSendReport()) {
         const log    = loadLog();
         const report = await generateReport(log);
@@ -860,11 +870,12 @@ async function startTradingLoop() {
         markReportSent();
         console.log("\n  ✅ Report sent");
       }
-    } catch (err) { console.error("Scan error:", err.message); }
-    setTimeout(tick, SCAN_INTERVAL_MS);
+    } catch (err) { console.error("Report error:", err.message); }
+    setTimeout(reportTick, 60 * 60 * 1000); // check every hour, fires when 4h elapsed
   };
 
   await tick();
+  setTimeout(reportTick, 60 * 60 * 1000); // first report check in 1 hour
 }
 
 // ─── Entry Point ──────────────────────────────────────────────────────────────

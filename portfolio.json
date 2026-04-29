@@ -1,12 +1,21 @@
 {
   "startingCapital": 1163.14,
   "legs": {
-    "A": { "cash": 0 },
-    "B": { "cash": 0 }
+    "A": { "cash": 636.94 },
+    "B": { "cash": 316.19 }
   },
-  "positions": {},
+  "positions": {
+    "DOGEUSDT": {
+      "leg": "A",
+      "quantity": 988.6,
+      "avgCost": 0.102,
+      "totalCost": 100.84,
+      "atrAtEntry": 0.0016,
+      "entryTime": 1777444222390
+    }
+  },
   "lastExits": {},
   "lastReportTime": 0,
   "paused": false,
-  "_note": "Baselined 2026-04-28. USD cash $1163.14 after selling BTC/ETH. reconcilePortfolioWithCoinbase() sets leg cash (A=$814.20, B=$348.94) on startup. AKT/WLUNA outside bot scope."
+  "_note": "Rebaselined 2026-04-29. Old 50% DOGE Leg B manually exited by user. Keeping new Leg A DOGE buy (988.6 @ $0.102, order bot-1777444222390-0nwnyc). USD $1053.97 split 70/30 minus DOGE position cost."
 }
