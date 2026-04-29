@@ -583,7 +583,6 @@ async function scanEntries() {
     console.log(`  EMA50: $${fmt(ema50)}  EMA200: $${fmt(ema200)}  → ${regimeLabel}`);
     console.log(`  RSI14: ${rsi14?.toFixed(1) ?? "N/A"}  ATR14: $${fmt(atr14)}`);
     console.log(`  Don20-high: $${fmt(don20H)}  Don10-low: $${fmt(don10L)}`);
-    console.log(`  TP target:  $${fmt(pos => pos ? pos.avgCost + 5 * atr14 : price + 5 * atr14)}`);
 
     const tpFromHere = (price + CONFIG.tpAtrMult * atr14).toFixed(2);
     console.log(`  TP from here: $${tpFromHere}  (+${((CONFIG.tpAtrMult * atr14) / price * 100).toFixed(1)}%)`);
