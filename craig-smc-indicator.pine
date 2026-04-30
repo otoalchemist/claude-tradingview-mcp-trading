@@ -28,12 +28,12 @@ fvgMinGapPct = input.float(0.05,"FVG Minimum Gap %", minval=0.01, step=0.01, gro
 fvgExtend    = input.int(20,    "FVG Box Extend (bars right)", minval=5, maxval=100, group=grp1)
 
 grp2 = "Display"
-showFVG      = input.bool(true,  "Show Fair Value Gaps",          group=grp2)
-showBOS      = input.bool(true,  "Show BOS / CHOCH Labels",       group=grp2)
-showLIL      = input.bool(true,  "Show Liquidity Inflection Levels (LIL)", group=grp2)
-showNYOpen   = input.bool(true,  "Show NY Open Line (9:30 AM ET)", group=grp2)
-show15mBias  = input.bool(true,  "Show 15-Minute Bias Label",     group=grp2)
-showSwingDots= input.bool(true,  "Show Swing High/Low Dots",      group=grp2)
+showFVG       = input.bool(true,  "Show Fair Value Gaps",                    group=grp2)
+showBOS       = input.bool(true,  "Show BOS / CHOCH Labels",                 group=grp2)
+showLIL       = input.bool(true,  "Show Liquidity Inflection Levels (LIL)", group=grp2)
+showNYOpen    = input.bool(true,  "Show NY Open Line (9:30 AM ET)",          group=grp2)
+show15mBias   = input.bool(true,  "Show 15-Minute Bias Label",               group=grp2)
+showSwingDots = input.bool(true,  "Show Swing High/Low Dots",                group=grp2)
 
 // ─── Colors ──────────────────────────────────────────────────────────────────
 bullFVGColor  = color.new(color.lime,   75)
@@ -45,142 +45,98 @@ chochColor    = color.new(color.orange,  0)
 lilColor      = color.new(color.yellow,  0)
 nyOpenColor   = color.new(color.red,     0)
 
+// ─── 15m Bias (must be at global scope — request.security cannot be in if blocks) ──
+ema50_15m  = request.security(syminfo.tickerid, "15", ta.ema(close, 50),  lookahead=barmerge.lookahead_off)
+ema200_15m = request.security(syminfo.tickerid, "15", ta.ema(close, 200), lookahead=barmerge.lookahead_off)
+
 // ─── Swing High / Low Detection ───────────────────────────────────────────────
 // ta.pivothigh/low returns the pivot value swingLen bars ago when confirmed
 swingHigh = ta.pivothigh(high, swingLen, swingLen)
 swingLow  = ta.pivotlow( low,  swingLen, swingLen)
 
-// Track most recent 2 confirmed swing highs and lows
-var float sh1 = na, sh2 = na  // most recent, previous swing high
-var float sl1 = na, sl2 = na  // most recent, previous swing low
-var int   shBar1 = na, slBar1 = na
+// Track most recent confirmed swing high and low (each var on its own line)
+var float sh1 = na
+var float sl1 = na
 
 if not na(swingHigh)
-    sh2    := sh1
-    sh1    := swingHigh
-    shBar1 := bar_index - swingLen
+    sh1 := swingHigh
 
 if not na(swingLow)
-    sl2    := sl1
-    sl1    := swingLow
-    slBar1 := bar_index - swingLen
+    sl1 := swingLow
 
 // ─── Market Structure: BOS & CHOCH ────────────────────────────────────────────
 // State: 0=neutral, 1=bullish structure, -1=bearish structure
 var int structure = 0
 
-// Bullish BOS: close pushes above most recent swing high (HH confirms uptrend)
-bullBOS  = not na(sh1) and close > sh1 and close[1] <= sh1 and structure >= 0
-// Bearish BOS: close pushes below most recent swing low (LL confirms downtrend)
-bearBOS  = not na(sl1) and close < sl1 and close[1] >= sl1 and structure <= 0
-// Bullish CHOCH: was in bearish structure, now breaks above last swing high (LH)
+// Bullish BOS: close pushes above most recent swing high
+bullBOS   = not na(sh1) and close > sh1 and close[1] <= sh1 and structure >= 0
+// Bearish BOS: close pushes below most recent swing low
+bearBOS   = not na(sl1) and close < sl1 and close[1] >= sl1 and structure <= 0
+// Bullish CHOCH: was in bearish structure, now breaks above last swing high
 bullCHOCH = not na(sh1) and close > sh1 and close[1] <= sh1 and structure == -1
-// Bearish CHOCH: was in bullish structure, now breaks below last swing low (HL)
+// Bearish CHOCH: was in bullish structure, now breaks below last swing low
 bearCHOCH = not na(sl1) and close < sl1 and close[1] >= sl1 and structure == 1
 
-// Update structure state (CHOCH takes priority over BOS for labeling)
+// Update structure state
 if bullCHOCH or bullBOS
     structure := 1
 if bearCHOCH or bearBOS
     structure := -1
 
-// Draw BOS labels (at the pivot bar, offset back)
+// Draw BOS / CHOCH labels
 if showBOS
     if bullBOS and not bullCHOCH
-        label.new(bar_index, low - ta.atr(14) * 1.5,
-          "BOS ▲", color=bosLabelColor, textcolor=color.white,
-          style=label.style_label_up, size=size.small)
+        label.new(bar_index, low - ta.atr(14) * 1.5, "BOS ▲", color=bosLabelColor, textcolor=color.white, style=label.style_label_up, size=size.small)
     if bearBOS and not bearCHOCH
-        label.new(bar_index, high + ta.atr(14) * 1.5,
-          "BOS ▼", color=bosLabelColor, textcolor=color.white,
-          style=label.style_label_down, size=size.small)
+        label.new(bar_index, high + ta.atr(14) * 1.5, "BOS ▼", color=bosLabelColor, textcolor=color.white, style=label.style_label_down, size=size.small)
     if bullCHOCH
-        label.new(bar_index, low - ta.atr(14) * 2.5,
-          "CHOCH ▲", color=chochColor, textcolor=color.white,
-          style=label.style_label_up, size=size.normal)
+        label.new(bar_index, low - ta.atr(14) * 2.5, "CHOCH ▲", color=chochColor, textcolor=color.white, style=label.style_label_up, size=size.normal)
     if bearCHOCH
-        label.new(bar_index, high + ta.atr(14) * 2.5,
-          "CHOCH ▼", color=chochColor, textcolor=color.white,
-          style=label.style_label_down, size=size.normal)
+        label.new(bar_index, high + ta.atr(14) * 2.5, "CHOCH ▼", color=chochColor, textcolor=color.white, style=label.style_label_down, size=size.normal)
 
 // ─── Liquidity Inflection Levels (LIL) ───────────────────────────────────────
-// Short horizontal lines extending right from each confirmed swing point
+// Short horizontal dashed lines extending right from each confirmed swing point
 if showLIL
     if not na(swingHigh)
-        line.new(bar_index - swingLen, swingHigh,
-                 bar_index - swingLen + 40, swingHigh,
-                 color=lilColor, width=1, style=line.style_dashed)
+        line.new(bar_index - swingLen, swingHigh, bar_index - swingLen + 40, swingHigh, color=lilColor, width=1, style=line.style_dashed)
     if not na(swingLow)
-        line.new(bar_index - swingLen, swingLow,
-                 bar_index - swingLen + 40, swingLow,
-                 color=lilColor, width=1, style=line.style_dashed)
+        line.new(bar_index - swingLen, swingLow,  bar_index - swingLen + 40, swingLow,  color=lilColor, width=1, style=line.style_dashed)
 
 // ─── Fair Value Gaps (FVG) ────────────────────────────────────────────────────
-// 3-candle imbalance pattern:
-//   Bullish FVG: high of candle [2] < low of candle [0]  (gap going up)
-//   Bearish FVG: low  of candle [2] > high of candle [0] (gap going down)
+// Bullish FVG: high[2] < low[0]  — gap between 3 candles going up
+// Bearish FVG: low[2]  > high[0] — gap between 3 candles going down
 if showFVG
-    minGap = close * fvgMinGapPct / 100
-
-    // Bullish FVG: box from high[2] (bottom) to low[0] (top)
+    minGap     = close * fvgMinGapPct / 100
     bullFVGgap = low - high[2]
-    if bullFVGgap > minGap
-        box.new(bar_index - 1, high[2], bar_index + fvgExtend, low,
-          bgcolor=bullFVGColor, border_color=bullFVGBorder, border_width=1)
-        // Midpoint line
-        line.new(bar_index - 1, (high[2] + low) / 2, bar_index + fvgExtend, (high[2] + low) / 2,
-          color=color.new(color.green, 20), width=1, style=line.style_dotted)
-
-    // Bearish FVG: box from high[0] (bottom of gap) to low[2] (top)
     bearFVGgap = low[2] - high
+
+    if bullFVGgap > minGap
+        box.new(bar_index - 1, high[2], bar_index + fvgExtend, low, bgcolor=bullFVGColor, border_color=bullFVGBorder, border_width=1)
+        line.new(bar_index - 1, (high[2] + low) / 2, bar_index + fvgExtend, (high[2] + low) / 2, color=color.new(color.green, 20), width=1, style=line.style_dotted)
+
     if bearFVGgap > minGap
-        box.new(bar_index - 1, high, bar_index + fvgExtend, low[2],
-          bgcolor=bearFVGColor, border_color=bearFVGBorder, border_width=1)
-        // Midpoint line
-        line.new(bar_index - 1, (high + low[2]) / 2, bar_index + fvgExtend, (high + low[2]) / 2,
-          color=color.new(color.red, 20), width=1, style=line.style_dotted)
+        box.new(bar_index - 1, high, bar_index + fvgExtend, low[2], bgcolor=bearFVGColor, border_color=bearFVGBorder, border_width=1)
+        line.new(bar_index - 1, (high + low[2]) / 2, bar_index + fvgExtend, (high + low[2]) / 2, color=color.new(color.red, 20), width=1, style=line.style_dotted)
 
 // ─── NY Open Line (9:30 AM ET) ────────────────────────────────────────────────
-// 9:30 AM ET = 13:30 UTC (EDT, Mar–Nov) or 14:30 UTC (EST, Nov–Mar)
-// Using 13:30 UTC as approximation for EDT (most of trading year)
 if showNYOpen
-    isNYOpenBar = (hour(time, "America/New_York") == 9 and
-                   minute(time, "America/New_York") == 30 and
-                   dayofweek != dayofweek.saturday and
-                   dayofweek != dayofweek.sunday)
+    isNYOpenBar = (hour(time, "America/New_York") == 9 and minute(time, "America/New_York") == 30 and dayofweek != dayofweek.saturday and dayofweek != dayofweek.sunday)
     if isNYOpenBar
-        nyLine = line.new(bar_index, low * 0.999, bar_index, high * 1.001,
-          color=nyOpenColor, width=2, style=line.style_dotted,
-          extend=line.extend.both)
-        label.new(bar_index, high * 1.001, "🗽 NY Open",
-          color=nyOpenColor, textcolor=color.white,
-          style=label.style_label_down, size=size.small)
+        line.new(bar_index, low * 0.999, bar_index, high * 1.001, color=nyOpenColor, width=2, style=line.style_dotted, extend=line.extend.both)
+        label.new(bar_index, high * 1.001, "🗽 NY Open", color=nyOpenColor, textcolor=color.white, style=label.style_label_down, size=size.small)
 
 // ─── 15-Minute Bias Label ─────────────────────────────────────────────────────
-// Shows higher-timeframe trend context using EMA50 / EMA200 on 15m
 if show15mBias and barstate.islast
-    ema50_15m  = request.security(syminfo.tickerid, "15", ta.ema(close, 50),  lookahead=barmerge.lookahead_off)
-    ema200_15m = request.security(syminfo.tickerid, "15", ta.ema(close, 200), lookahead=barmerge.lookahead_off)
-
     isBull15m = ema50_15m > ema200_15m
     isBear15m = ema50_15m < ema200_15m
-
     biasText  = isBull15m ? "15m BIAS: BULLISH 📈" : isBear15m ? "15m BIAS: BEARISH 📉" : "15m BIAS: NEUTRAL ↔"
     biasBg    = isBull15m ? color.new(color.green, 20) : isBear15m ? color.new(color.red, 20) : color.new(color.gray, 30)
-
-    label.new(bar_index, high * 1.002, biasText,
-      color=biasBg, textcolor=color.white,
-      style=label.style_label_left, size=size.normal)
+    label.new(bar_index, high * 1.002, biasText, color=biasBg, textcolor=color.white, style=label.style_label_left, size=size.normal)
 
 // ─── Swing Dots ───────────────────────────────────────────────────────────────
-plotshape(showSwingDots and not na(swingHigh),
-  "Swing High", shape.triangledown, location.abovebar,
-  color.new(color.red, 20), size=size.tiny)
-plotshape(showSwingDots and not na(swingLow),
-  "Swing Low", shape.triangleup, location.belowbar,
-  color.new(color.green, 20), size=size.tiny)
+plotshape(showSwingDots and not na(swingHigh), "Swing High", shape.triangledown, location.abovebar, color.new(color.red,   20), size=size.tiny)
+plotshape(showSwingDots and not na(swingLow),  "Swing Low",  shape.triangleup,   location.belowbar, color.new(color.green, 20), size=size.tiny)
 
 // ─── Structure Trend Color Background (subtle) ────────────────────────────────
-bgcolor(structure == 1  ? color.new(color.green, 97) :
-        structure == -1 ? color.new(color.red,   97) : na,
-        title="Structure Background")
+bgCol = structure == 1 ? color.new(color.green, 97) : structure == -1 ? color.new(color.red, 97) : na
+bgcolor(bgCol, title="Structure Background")
