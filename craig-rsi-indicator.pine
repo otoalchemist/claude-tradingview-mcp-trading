@@ -97,7 +97,7 @@ plotshape(bullDiv, "Bullish Div", shape.triangleup,   location.belowbar, color.n
 if showNYOpen
     isNYOpen = (hour(time, "America/New_York") == 9 and minute(time, "America/New_York") == 30 and dayofweek != dayofweek.saturday and dayofweek != dayofweek.sunday)
     if isNYOpen
-        line.new(bar_index, 0, bar_index, 100, color=color.new(color.red, 20), width=2, style=line.style_dotted, extend=line.extend.both)
+        line.new(bar_index, 0, bar_index, 100, color=color.new(color.red, 20), width=2, style=line.style_dotted, extend=extend.both)
 
 // ─── RSI Value Label (current bar) ───────────────────────────────────────────
 if barstate.islast
