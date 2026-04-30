@@ -83,16 +83,19 @@ if bullCHOCH or bullBOS
 if bearCHOCH or bearBOS
     structure := -1
 
+// ATR at global scope — ta.atr() must not be called inside if blocks
+atr14 = ta.atr(14)
+
 // Draw BOS / CHOCH labels
 if showBOS
     if bullBOS and not bullCHOCH
-        label.new(bar_index, low - ta.atr(14) * 1.5, "BOS ▲", color=bosLabelColor, textcolor=color.white, style=label.style_label_up, size=size.small)
+        label.new(bar_index, low - atr14 * 1.5, "BOS ▲", color=bosLabelColor, textcolor=color.white, style=label.style_label_up, size=size.small)
     if bearBOS and not bearCHOCH
-        label.new(bar_index, high + ta.atr(14) * 1.5, "BOS ▼", color=bosLabelColor, textcolor=color.white, style=label.style_label_down, size=size.small)
+        label.new(bar_index, high + atr14 * 1.5, "BOS ▼", color=bosLabelColor, textcolor=color.white, style=label.style_label_down, size=size.small)
     if bullCHOCH
-        label.new(bar_index, low - ta.atr(14) * 2.5, "CHOCH ▲", color=chochColor, textcolor=color.white, style=label.style_label_up, size=size.normal)
+        label.new(bar_index, low - atr14 * 2.5, "CHOCH ▲", color=chochColor, textcolor=color.white, style=label.style_label_up, size=size.normal)
     if bearCHOCH
-        label.new(bar_index, high + ta.atr(14) * 2.5, "CHOCH ▼", color=chochColor, textcolor=color.white, style=label.style_label_down, size=size.normal)
+        label.new(bar_index, high + atr14 * 2.5, "CHOCH ▼", color=chochColor, textcolor=color.white, style=label.style_label_down, size=size.normal)
 
 // ─── Liquidity Inflection Levels (LIL) ───────────────────────────────────────
 // Short horizontal dashed lines extending right from each confirmed swing point
@@ -122,7 +125,7 @@ if showFVG
 if showNYOpen
     isNYOpenBar = (hour(time, "America/New_York") == 9 and minute(time, "America/New_York") == 30 and dayofweek != dayofweek.saturday and dayofweek != dayofweek.sunday)
     if isNYOpenBar
-        line.new(bar_index, low * 0.999, bar_index, high * 1.001, color=nyOpenColor, width=2, style=line.style_dotted, extend=line.extend.both)
+        line.new(bar_index, low * 0.999, bar_index, high * 1.001, color=nyOpenColor, width=2, style=line.style_dotted, extend=extend.both)
         label.new(bar_index, high * 1.001, "🗽 NY Open", color=nyOpenColor, textcolor=color.white, style=label.style_label_down, size=size.small)
 
 // ─── 15-Minute Bias Label ─────────────────────────────────────────────────────
