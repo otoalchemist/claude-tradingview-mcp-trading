@@ -52,8 +52,8 @@ hline(50,        "Midline",     color.new(color.gray,  60), linestyle=hline.styl
 // ─── OB/OS Background Fills ──────────────────────────────────────────────────
 extremeOBbg = plot(obExtreme, display=display.none)
 extremeOSbg = plot(osExtreme, display=display.none)
-obTopBand   = plot(100,       display=display.none)
-osBotBand   = plot(0,         display=display.none)
+obTopBand   = plot(100.0,     display=display.none)
+osBotBand   = plot(0.0,       display=display.none)
 
 fill(extremeOBbg, obTopBand, color=color.new(color.red,   60), title="Extreme OB Fill")
 fill(extremeOSbg, osBotBand, color=color.new(color.green, 60), title="Extreme OS Fill")

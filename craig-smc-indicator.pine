@@ -114,11 +114,13 @@ if showFVG
     bearFVGgap = low[2] - high
 
     if bullFVGgap > minGap
-        box.new(bar_index - 1, high[2], bar_index + fvgExtend, low, bgcolor=bullFVGColor, border_color=bullFVGBorder, border_width=1)
+        // box.new(left, top, right, bottom) — top must be the higher price
+        box.new(bar_index - 1, low, bar_index + fvgExtend, high[2], bgcolor=bullFVGColor, border_color=bullFVGBorder, border_width=1)
         line.new(bar_index - 1, (high[2] + low) / 2, bar_index + fvgExtend, (high[2] + low) / 2, color=color.new(color.green, 20), width=1, style=line.style_dotted)
 
     if bearFVGgap > minGap
-        box.new(bar_index - 1, high, bar_index + fvgExtend, low[2], bgcolor=bearFVGColor, border_color=bearFVGBorder, border_width=1)
+        // box.new(left, top, right, bottom) — top must be the higher price
+        box.new(bar_index - 1, low[2], bar_index + fvgExtend, high, bgcolor=bearFVGColor, border_color=bearFVGBorder, border_width=1)
         line.new(bar_index - 1, (high + low[2]) / 2, bar_index + fvgExtend, (high + low[2]) / 2, color=color.new(color.red, 20), width=1, style=line.style_dotted)
 
 // ─── NY Open Line (9:30 AM ET) ────────────────────────────────────────────────
@@ -129,12 +131,16 @@ if showNYOpen
         label.new(bar_index, high * 1.001, "🗽 NY Open", color=nyOpenColor, textcolor=color.white, style=label.style_label_down, size=size.small)
 
 // ─── 15-Minute Bias Label ─────────────────────────────────────────────────────
+// Use var label + delete so only one label exists at a time (barstate.islast
+// fires on every realtime tick — without delete, labels accumulate)
+var label biasLabel = na
 if show15mBias and barstate.islast
+    label.delete(biasLabel)
     isBull15m = ema50_15m > ema200_15m
     isBear15m = ema50_15m < ema200_15m
     biasText  = isBull15m ? "15m BIAS: BULLISH 📈" : isBear15m ? "15m BIAS: BEARISH 📉" : "15m BIAS: NEUTRAL ↔"
     biasBg    = isBull15m ? color.new(color.green, 20) : isBear15m ? color.new(color.red, 20) : color.new(color.gray, 30)
-    label.new(bar_index, high * 1.002, biasText, color=biasBg, textcolor=color.white, style=label.style_label_left, size=size.normal)
+    biasLabel := label.new(bar_index, high * 1.002, biasText, color=biasBg, textcolor=color.white, style=label.style_label_left, size=size.normal)
 
 // ─── Swing Dots ───────────────────────────────────────────────────────────────
 plotshape(showSwingDots and not na(swingHigh), "Swing High", shape.triangledown, location.abovebar, color.new(color.red,   20), size=size.tiny)
