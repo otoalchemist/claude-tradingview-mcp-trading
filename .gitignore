@@ -2,6 +2,8 @@
 *.log
 safety-check-log.json
 safety-check-log-archive.json
+craig-portfolio.json
+craig-log.json
 node_modules/
 
 # Screenshots
@@ -40,9 +42,9 @@ backtest-tp.mjs
 backtest-volatile.mjs
 backtest-vs-buyhold.mjs
 
-# TradingView Pine scripts and text dumps
-*.pine
+# TradingView Pine scripts and text dumps (allow craig indicator scripts)
 pine-*.txt
+strategy-report-*.txt
 strategy-report-*.txt
 tg-offset.json
 trades-archive.csv

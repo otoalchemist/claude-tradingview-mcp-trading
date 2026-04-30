@@ -1,0 +1,134 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// Craig RSI — Advanced RSI with OB/OS Highlight Bands
+// Approximates the "Inevitrade Pro Plus" indicator used by Craig Percoco
+//
+// HOW TO USE:
+//   1. Open Pine Script Editor in TradingView
+//   2. Click the "+" (Add pane) button to add this as a SEPARATE PANE below the chart
+//   3. Paste and apply
+//
+// FEATURES:
+//   • RSI with smoothed signal line
+//   • Overbought zone (>70) highlighted red — look for shorts here
+//   • Oversold zone (<30) highlighted green — look for longs here
+//   • Extreme zones (>80 / <20) highlighted strongly — high-probability reversals
+//   • RSI divergence dots (price makes HH but RSI makes LH = bearish div, etc.)
+//   • Color-coded RSI line: green above 50, red below 50
+//   • NY Open vertical marker at 9:30 AM ET
+// ═══════════════════════════════════════════════════════════════════════════
+
+//@version=5
+indicator("Craig RSI — Inevitrade Style", precision=2, timeframe="")
+
+// ─── Inputs ──────────────────────────────────────────────────────────────────
+rsiLen      = input.int(14,   "RSI Length",              minval=1)
+sigLen      = input.int(9,    "Signal MA Length",        minval=1)
+obLevel     = input.int(70,   "Overbought Level",        minval=50, maxval=90)
+osLevel     = input.int(30,   "Oversold Level",          maxval=50, minval=10)
+obExtreme   = input.int(80,   "Extreme Overbought",      minval=70, maxval=95)
+osExtreme   = input.int(20,   "Extreme Oversold",        maxval=30, minval=5)
+showDiv     = input.bool(true, "Show RSI Divergence")
+showNYOpen  = input.bool(true, "Show NY Open Marker")
+showSignal  = input.bool(true, "Show Signal Line")
+
+// ─── RSI Calculation ─────────────────────────────────────────────────────────
+rsiVal = ta.rsi(close, rsiLen)
+sigVal = ta.ema(rsiVal, sigLen)  // smoothed signal line
+
+// ─── Dynamic RSI Color ────────────────────────────────────────────────────────
+rsiColor = rsiVal >= obLevel   ? color.new(color.red,   0)  :
+           rsiVal <= osLevel   ? color.new(color.lime,  0)  :
+           rsiVal >= 50        ? color.new(color.green, 30) :
+                                 color.new(color.red,   30)
+
+// ─── Plots ───────────────────────────────────────────────────────────────────
+rsiPlot = plot(rsiVal,  "RSI",    color=rsiColor, linewidth=2)
+sigPlot = plot(showSignal ? sigVal : na, "Signal", color=color.new(color.white, 50), linewidth=1, style=plot.style_line)
+
+// OB/OS reference lines
+hline(obLevel,   "Overbought",  color.new(color.red,    30), linestyle=hline.style_dashed)
+hline(osLevel,   "Oversold",    color.new(color.green,  30), linestyle=hline.style_dashed)
+hline(obExtreme, "OB Extreme",  color.new(color.red,     0), linestyle=hline.style_solid)
+hline(osExtreme, "OS Extreme",  color.new(color.green,   0), linestyle=hline.style_solid)
+hline(50,        "Midline",     color.new(color.gray,   60), linestyle=hline.style_dotted)
+
+// ─── OB/OS Background Fills ──────────────────────────────────────────────────
+// Extreme zones (stronger highlight)
+extremeOBbg = plot(obExtreme, display=display.none)
+extremeOSbg = plot(osExtreme, display=display.none)
+obTopBand   = plot(100,       display=display.none)
+osBotBand   = plot(0,         display=display.none)
+
+fill(extremeOBbg, obTopBand, color=color.new(color.red,   60), title="Extreme OB Fill")
+fill(extremeOSbg, osBotBand, color=color.new(color.green, 60), title="Extreme OS Fill")
+
+// Standard OB/OS zones (subtle)
+obBandPlot = plot(obLevel, display=display.none)
+osBandPlot = plot(osLevel, display=display.none)
+
+fill(obBandPlot, extremeOBbg, color=color.new(color.red,   80), title="OB Zone Fill")
+fill(osBandPlot, extremeOSbg, color=color.new(color.green, 80), title="OS Zone Fill")
+
+// RSI / Signal crossover fill
+fill(rsiPlot, sigPlot,
+  color=rsiVal > sigVal ? color.new(color.green, 85) : color.new(color.red, 85),
+  title="RSI/Signal Fill")
+
+// ─── Divergence Detection ─────────────────────────────────────────────────────
+// Bearish divergence: price makes HH but RSI makes LH (within last 5 bars)
+// Bullish divergence: price makes LL but RSI makes HL
+
+var float phPrice = na, var float phRSI = na  // pivot high
+var float plPrice = na, var float plRSI = na  // pivot low
+
+swingH_price = ta.pivothigh(high,   5, 5)
+swingH_rsi   = ta.pivothigh(rsiVal, 5, 5)
+swingL_price = ta.pivotlow( low,    5, 5)
+swingL_rsi   = ta.pivotlow( rsiVal, 5, 5)
+
+bearDiv = showDiv and
+  not na(swingH_price) and not na(phPrice) and
+  not na(swingH_rsi)   and not na(phRSI)  and
+  swingH_price > phPrice and  // price: higher high
+  swingH_rsi   < phRSI        // RSI:   lower high
+
+bullDiv = showDiv and
+  not na(swingL_price) and not na(plPrice) and
+  not na(swingL_rsi)   and not na(plRSI)  and
+  swingL_price < plPrice and  // price: lower low
+  swingL_rsi   > plRSI        // RSI:   higher low
+
+if not na(swingH_price)
+    phPrice := swingH_price
+    phRSI   := swingH_rsi
+if not na(swingL_price)
+    plPrice := swingL_price
+    plRSI   := swingL_rsi
+
+plotshape(bearDiv, "Bearish Div", shape.triangledown, location.abovebar,
+  color.new(color.red, 0), size=size.small, title="Bearish Divergence")
+plotshape(bullDiv, "Bullish Div", shape.triangleup,   location.belowbar,
+  color.new(color.lime, 0), size=size.small, title="Bullish Divergence")
+
+// ─── NY Open Marker ───────────────────────────────────────────────────────────
+if showNYOpen
+    isNYOpen = (hour(time, "America/New_York") == 9 and
+                minute(time, "America/New_York") == 30 and
+                dayofweek != dayofweek.saturday and
+                dayofweek != dayofweek.sunday)
+    if isNYOpen
+        line.new(bar_index, 0, bar_index, 100,
+          color=color.new(color.red, 20), width=2,
+          style=line.style_dotted, extend=line.extend.both)
+
+// ─── RSI Value Label (current) ────────────────────────────────────────────────
+if barstate.islast
+    rsiLabelColor = rsiVal >= obExtreme ? color.new(color.red, 0) :
+                    rsiVal <= osExtreme ? color.new(color.green, 0) :
+                    rsiVal >= obLevel   ? color.new(color.orange, 0) :
+                    rsiVal <= osLevel   ? color.new(color.lime, 0) :
+                    color.new(color.gray, 0)
+    label.new(bar_index + 2, rsiVal,
+      str.tostring(math.round(rsiVal, 1)),
+      color=rsiLabelColor, textcolor=color.white,
+      style=label.style_label_left, size=size.small)

@@ -8,7 +8,9 @@
     "start": "node bot.js",
     "dev": "node bot.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "craig": "node craig-bot.js",
+    "craig:paper": "CRAIG_PAPER=true node craig-bot.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
