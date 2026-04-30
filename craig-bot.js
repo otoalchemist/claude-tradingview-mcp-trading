@@ -738,78 +738,11 @@ async function tick() {
   if (dirty) saveState(state);
 }
 
-// ─── Status Report ────────────────────────────────────────────────────────────
-
-async function sendStatusReport() {
-  const state = loadState();
-  const pos   = state.position;
-  const stats = state.stats;
-  const livePrice = await getCurrentPrice(CONFIG.symbol);
-
-  let posLine = "No open position";
-  if (pos) {
-    const pnl = pos.side === "long"
-      ? (livePrice - pos.entry) * pos.qty
-      : (pos.entry - livePrice) * pos.qty;
-    posLine = `${pos.side.toUpperCase()} @ $${pos.entry.toFixed(2)} | ` +
-              `SL: $${pos.sl.toFixed(2)} | TP: $${pos.tp.toFixed(2)}\n` +
-              `Qty: ${pos.qty.toFixed(6)} BTC | Unrealized: $${pnl.toFixed(2)}\n` +
-              `BE: ${pos.beTriggered ? "✅ Set" : "⏳ Watching"}`;
-  }
-
-  const totalTrades = stats.wins + stats.losses + stats.breakevens;
-  const wr = totalTrades > 0 ? ((stats.wins / totalTrades) * 100).toFixed(1) : "—";
-
-  await sendTelegram(
-    `📊 <b>CRAIG BOT STATUS</b>\n` +
-    `${CONFIG.symbol} | ${CONFIG.paperTrading ? "📝 PAPER" : "🔴 LIVE"}\n\n` +
-    `Phase: ${state.phase.toUpperCase()}\n` +
-    `15m Bias: ${state.bias}\n\n` +
-    `<b>Position:</b>\n${posLine}\n\n` +
-    `<b>Stats (all-time):</b>\n` +
-    `Trades: ${totalTrades} | W: ${stats.wins} L: ${stats.losses} BE: ${stats.breakevens}\n` +
-    `Win Rate: ${wr}% | PnL: $${stats.totalRealizedPnL.toFixed(2)}`
-  );
-}
-
-// ─── Telegram Commands ────────────────────────────────────────────────────────
-
-let lastUpdateId = 0;
-
-async function pollTelegramCommands() {
-  const { token, chatId } = CONFIG.telegram;
-  if (!token || !chatId) return;
-  try {
-    const res  = await fetch(
-      `https://api.telegram.org/bot${token}/getUpdates?offset=${lastUpdateId + 1}&timeout=5`
-    );
-    const data = await res.json();
-    for (const update of (data.result || [])) {
-      lastUpdateId = update.update_id;
-      const text = update.message?.text?.trim() || "";
-      if (text === "/craig_status" || text === "/cs") {
-        await sendStatusReport();
-      } else if (text === "/craig_pause") {
-        const state = loadState();
-        state.paused = true;
-        saveState(state);
-        await sendTelegram("⏸️ Craig Bot paused — no new entries.");
-      } else if (text === "/craig_resume") {
-        const state = loadState();
-        state.paused = false;
-        saveState(state);
-        await sendTelegram("▶️ Craig Bot resumed.");
-      } else if (text === "/craig_close") {
-        const state = loadState();
-        if (state.position) {
-          await sendTelegram("⚠️ Manual close requested — execute on Coinbase directly for safety.");
-        } else {
-          await sendTelegram("Craig Bot: no open position to close.");
-        }
-      }
-    }
-  } catch {}
-}
+// ─── Note on Telegram Commands ────────────────────────────────────────────────
+// Craig bot commands (/craig_status, /craig_pause, /craig_resume) are handled
+// by telegram.js's single long-polling loop — NOT here. Two processes cannot
+// share one Telegram token's getUpdates stream. telegram.js reads craig-portfolio.json
+// directly to serve /craig_status and writes it for /craig_pause & /craig_resume.
 
 // ─── Startup ──────────────────────────────────────────────────────────────────
 
@@ -848,11 +781,10 @@ async function start() {
   // Initial tick
   await tick();
 
-  // Main scan loop
+  // Main scan loop — commands handled by telegram.js long-poller, not here
   const scanLoop = async () => {
     const state = loadState();
     if (!state.paused) await tick();
-    await pollTelegramCommands();
     setTimeout(scanLoop, SCAN_INTERVAL);
   };
   setTimeout(scanLoop, SCAN_INTERVAL);

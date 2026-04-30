@@ -23,22 +23,26 @@ function isPaperMode() {
   return process.env.PAPER_TRADING !== "false";
 }
 
-const STATE_FILE  = "portfolio.json";
-const LOG_FILE    = "safety-check-log.json";
-const OFFSET_FILE = "tg-offset.json";
+const STATE_FILE       = "portfolio.json";
+const LOG_FILE         = "safety-check-log.json";
+const OFFSET_FILE      = "tg-offset.json";
+const CRAIG_STATE_FILE = "craig-portfolio.json";
 
 // ─── Commands registered with BotFather ──────────────────────────────────────
 // Only commands that actually exist in the code.
 
 const BOT_COMMANDS = [
-  { command: "help",      description: "List all commands" },
-  { command: "status",    description: "Bot mode, trades today, last run" },
-  { command: "prices",    description: "Live prices + 24h change" },
-  { command: "portfolio", description: "Cash, open positions, P&L" },
-  { command: "trades",    description: "Today's trade activity" },
-  { command: "report",    description: "Full intelligence report on demand" },
-  { command: "pause",     description: "Stop placing new trades" },
-  { command: "resume",    description: "Resume trading" },
+  { command: "help",          description: "List all commands" },
+  { command: "status",        description: "E2 bot: mode, trades today, last run" },
+  { command: "prices",        description: "Live prices + 24h change" },
+  { command: "portfolio",     description: "E2: cash, open positions, P&L" },
+  { command: "trades",        description: "Today's trade activity" },
+  { command: "report",        description: "Full intelligence report on demand" },
+  { command: "pause",         description: "Pause E2 bot (no new trades)" },
+  { command: "resume",        description: "Resume E2 bot" },
+  { command: "craig_status",  description: "Craig bot: phase, position, stats" },
+  { command: "craig_pause",   description: "Pause Craig bot" },
+  { command: "craig_resume",  description: "Resume Craig bot" },
 ];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -178,12 +182,21 @@ async function fetchPrices() {
 async function cmdHelp() {
   const mode = isPaperMode() ? "📋 Paper" : "🔴 Live";
   const syms = getSymbols();
+  const craigState = loadCraigState();
+  const craigRunning = existsSync(CRAIG_STATE_FILE);
+
+  const e2Commands   = BOT_COMMANDS.filter(c => !c.command.startsWith("craig"));
+  const craigCommands = BOT_COMMANDS.filter(c => c.command.startsWith("craig"));
+
   const lines = [
-    `🤖 <b>Claude Trading Bot</b>`,
-    `Mode: ${mode} | Assets: ${syms.map(s => s.replace("USDT", "")).join(", ")}`,
+    `🤖 <b>Claude Trading Bots</b>`,
     ``,
-    `<b>Commands</b>`,
-    ...BOT_COMMANDS.map(c => `/${c.command} — ${c.description}`),
+    `<b>E2 Bot</b> (6h swing ensemble) — ${mode}`,
+    `Assets: ${syms.map(s => s.replace("USDT", "")).join(", ")}`,
+    ...e2Commands.map(c => `  /${c.command} — ${c.description}`),
+    ``,
+    `<b>Craig Bot</b> (1m SMC/ICT) — ${craigRunning ? (craigState.paused ? "⏸ paused" : "▶️ running") : "not started"}`,
+    ...craigCommands.map(c => `  /${c.command} — ${c.description}`),
   ];
   await send(lines.join("\n"));
 }
@@ -366,6 +379,77 @@ async function cmdResume() {
   await send("▶️ <b>Bot resumed.</b>\nBack to scanning for signals.");
 }
 
+// ─── Craig Bot Commands ───────────────────────────────────────────────────────
+
+function loadCraigState() {
+  const defaults = { phase: "idle", bias: "neutral", setup: null, position: null,
+    paused: false, stats: { wins: 0, losses: 0, breakevens: 0, totalRealizedPnL: 0 } };
+  if (!existsSync(CRAIG_STATE_FILE)) return defaults;
+  try { return { ...defaults, ...JSON.parse(readFileSync(CRAIG_STATE_FILE, "utf8")) }; }
+  catch { return defaults; }
+}
+
+function saveCraigState(s) {
+  writeFileSync(CRAIG_STATE_FILE, JSON.stringify(s, null, 2));
+}
+
+async function cmdCraigStatus() {
+  const state = loadCraigState();
+  const pos   = state.position;
+  const stats = state.stats;
+
+  // Fetch live BTC price for unrealized P&L
+  let livePrice = 0;
+  try {
+    const r = await fetch("https://api.coinbase.com/api/v3/brokerage/market/products/BTC-USD",
+      { signal: AbortSignal.timeout(5000) });
+    const d = await r.json();
+    livePrice = parseFloat(d.price || 0);
+  } catch {}
+
+  let posLine = "No open position";
+  if (pos) {
+    const pnl = pos.side === "long"
+      ? (livePrice - pos.entry) * pos.qty
+      : (pos.entry - livePrice) * pos.qty;
+    posLine =
+      `${pos.side.toUpperCase()} BTC @ $${pos.entry.toFixed(2)}\n` +
+      `SL: $${pos.sl.toFixed(2)}  |  TP: $${pos.tp.toFixed(2)}\n` +
+      `Qty: ${pos.qty.toFixed(6)} BTC\n` +
+      `Unrealized: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}\n` +
+      `BE: ${pos.beTriggered ? "✅ set" : "⏳ watching"}`;
+  }
+
+  const total  = stats.wins + stats.losses + stats.breakevens;
+  const wr     = total > 0 ? ((stats.wins / total) * 100).toFixed(1) : "—";
+  const isRun  = existsSync(CRAIG_STATE_FILE);
+
+  await send(
+    `🧠 <b>Craig Bot Status</b> ${state.paused ? "⏸" : "▶️"}\n\n` +
+    `Phase: ${state.phase.toUpperCase()}\n` +
+    `15m Bias: ${state.bias}\n` +
+    `Running: ${isRun ? "yes" : "state file missing"}\n\n` +
+    `<b>Position:</b>\n${posLine}\n\n` +
+    `<b>Stats:</b>\n` +
+    `Trades: ${total}  W: ${stats.wins}  L: ${stats.losses}  BE: ${stats.breakevens}\n` +
+    `Win Rate: ${wr}%  |  PnL: $${stats.totalRealizedPnL.toFixed(2)}`
+  );
+}
+
+async function cmdCraigPause() {
+  const state = loadCraigState();
+  state.paused = true;
+  saveCraigState(state);
+  await send("⏸️ <b>Craig Bot paused.</b> No new entries until /craig_resume.");
+}
+
+async function cmdCraigResume() {
+  const state = loadCraigState();
+  state.paused = false;
+  saveCraigState(state);
+  await send("▶️ <b>Craig Bot resumed.</b> Back to scanning for SMC setups.");
+}
+
 // ─── Command Router ───────────────────────────────────────────────────────────
 
 async function handleUpdate(update) {
@@ -376,14 +460,17 @@ async function handleUpdate(update) {
   console.log(`📨 Telegram command: /${cmd}`);
 
   try {
-    if      (cmd === "help")      await cmdHelp();
-    else if (cmd === "status")    await cmdStatus();
-    else if (cmd === "prices")    await cmdPrices();
-    else if (cmd === "portfolio") await cmdPortfolio();
-    else if (cmd === "trades")    await cmdTrades();
-    else if (cmd === "report")    await cmdReport();
-    else if (cmd === "pause")     await cmdPause();
-    else if (cmd === "resume")    await cmdResume();
+    if      (cmd === "help")          await cmdHelp();
+    else if (cmd === "status")        await cmdStatus();
+    else if (cmd === "prices")        await cmdPrices();
+    else if (cmd === "portfolio")     await cmdPortfolio();
+    else if (cmd === "trades")        await cmdTrades();
+    else if (cmd === "report")        await cmdReport();
+    else if (cmd === "pause")         await cmdPause();
+    else if (cmd === "resume")        await cmdResume();
+    else if (cmd === "craig_status" || cmd === "cs") await cmdCraigStatus();
+    else if (cmd === "craig_pause")   await cmdCraigPause();
+    else if (cmd === "craig_resume")  await cmdCraigResume();
     else await send(`❓ Unknown command: /${cmd}\n\nSend /help to see available commands.`);
   } catch (err) {
     console.log(`⚠️  Command /${cmd} failed: ${err.message}`);
