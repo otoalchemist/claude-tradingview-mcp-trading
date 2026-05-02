@@ -1,0 +1,79 @@
+//@version=5
+// MCC v2 Composite Score — Panel Indicator
+// Shows the active composite score (bull in death cross, bear in golden cross)
+// Yellow dashed line = 0.30 entry threshold (same as deployed bot)
+indicator("MCC v2 Composite Score", overlay=false, max_bars_back=500)
+
+minScore = input.float(0.30, "Entry Threshold", minval=0.05, maxval=1.0, step=0.05)
+
+// ─── Indicators (same as overlay) ────────────────────────────────────────────
+ma50  = ta.sma(close, 50)
+ma200 = ta.sma(close, 200)
+ema9  = ta.ema(close, 9)
+ema21 = ta.ema(close, 21)
+
+[bbMiddle, bbUpper, bbLower] = ta.bb(close, 20, 2)
+
+vwapVal    = ta.vwap(hlc3)
+vwapDev    = ta.stdev(hlc3, 20)
+vwapUpper2 = vwapVal + 2 * vwapDev
+vwapLower2 = vwapVal - 2 * vwapDev
+
+rsi14      = ta.rsi(close, 14)
+stochK     = ta.stoch(rsi14, rsi14, rsi14, 14)
+stochSmooth = ta.sma(stochK, 3)
+
+[macdLine, signalLine, macdHist] = ta.macd(close, 12, 26, 9)
+macdImproving = macdHist > macdHist[1]
+
+cci20   = ta.cci(close, 20)
+volAvg  = ta.sma(volume, 20)
+volRatio = volAvg != 0 ? volume / volAvg : 1.0
+
+goldenCross = ma50 > ma200
+deathCross  = ma50 < ma200
+regimeGap   = math.abs(ma50 - ma200) / ma200
+
+// ─── Score Function ───────────────────────────────────────────────────────────
+cl(v) => math.max(0.0, math.min(1.0, v))
+
+// Bull (death cross)
+s_rsi_bull    = cl((40  - rsi14)      / 40)
+s_stoch_bull  = cl((25  - stochSmooth)/ 25)
+s_bb_bull     = bbLower  != 0 ? cl((bbLower  - close) / (bbLower  * 0.015)) : 0.0
+s_vwap_bull   = vwapLower2 != 0 ? cl((vwapLower2 - close) / (vwapLower2 * 0.01)) : 0.0
+s_macd_bull   = macdImproving ? 1.0 : 0.0
+s_vol_bull    = cl((volRatio - 1.0) / 1.5)
+s_cci_bull    = cl((-80  - cci20)     / 120)
+s_ema_bull    = ema21 != 0 ? cl((ema21 - ema9) / ema21 / 0.003)   : 0.0
+s_regime_bull = deathCross  ? cl(regimeGap / 0.02) : 0.0
+bullScore = (s_rsi_bull + s_stoch_bull + s_bb_bull + s_vwap_bull + s_macd_bull + s_vol_bull + s_cci_bull + s_ema_bull + s_regime_bull) / 9
+
+// Bear (golden cross)
+s_rsi_bear    = cl((rsi14      - 60)  / 40)
+s_stoch_bear  = cl((stochSmooth- 75)  / 25)
+s_bb_bear     = bbUpper  != 0 ? cl((close - bbUpper)  / (bbUpper  * 0.015)) : 0.0
+s_vwap_bear   = vwapUpper2 != 0 ? cl((close - vwapUpper2) / (vwapUpper2 * 0.01)) : 0.0
+s_macd_bear   = not macdImproving ? 1.0 : 0.0
+s_vol_bear    = cl((volRatio - 1.0) / 1.5)
+s_cci_bear    = cl((cci20      - 80)  / 120)
+s_ema_bear    = ema21 != 0 ? cl((ema9  - ema21) / ema21 / 0.003) : 0.0
+s_regime_bear = goldenCross ? cl(regimeGap / 0.02) : 0.0
+bearScore = (s_rsi_bear + s_stoch_bear + s_bb_bear + s_vwap_bear + s_macd_bear + s_vol_bear + s_cci_bear + s_ema_bear + s_regime_bear) / 9
+
+// Active score — bull in death cross, bear in golden cross
+activeScore = deathCross ? bullScore : bearScore
+triggered   = activeScore >= minScore
+
+// ─── Plots ────────────────────────────────────────────────────────────────────
+hline(minScore, "Entry Threshold (0.30)", color=color.yellow, linestyle=hline.style_dashed, linewidth=2)
+hline(0.5,  "50%",  color=color.new(color.gray, 60), linestyle=hline.style_dotted)
+hline(1.0,  "100%", color=color.new(color.gray, 70))
+hline(0.0,  "0%",   color=color.new(color.gray, 70))
+
+barCol = deathCross
+  ? (triggered ? color.new(color.green, 20) : color.new(color.green, 70))
+  : (triggered ? color.new(color.red,   20) : color.new(color.red,   70))
+
+plot(activeScore, "Composite Score", color=barCol, style=plot.style_histogram, linewidth=3)
+plot(activeScore, "Score Line",      color=barCol, linewidth=2)

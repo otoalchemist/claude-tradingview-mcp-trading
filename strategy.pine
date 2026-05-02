@@ -1,0 +1,197 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// Contrarian G/D Cross — Bot Strategy  (Pine Script v5)
+//
+// Exact mirror of the live trading bot logic:
+//   • Regime  : 5m MA50 vs MA200  (Death Cross = buy side, Golden = sell side)
+//   • Gate    : RSI(14) ≤ 38 to BUY  |  RSI(14) ≥ 62 to SELL
+//   • Sizing  : Signal strength 0-100% scales position from 20% → 100% of max
+//   • Exits   : BB middle reversion  |  1.5× ATR stop  |  5% TP  |  72-bar max hold
+//
+// How to use:
+//   1. Open TradingView → Pine Script Editor (bottom panel)
+//   2. Paste this script → Add to chart
+//   3. Set chart to BTCUSDT / ETHUSDT / SOLUSDT on 5m timeframe
+//   4. Open "Strategy Tester" tab to see results
+// ═══════════════════════════════════════════════════════════════════════════
+
+//@version=5
+strategy(
+    title              = "Contrarian G/D Cross — Bot Strategy",
+    shorttitle         = "CGD Bot",
+    overlay            = true,
+    initial_capital    = 1000,
+    default_qty_type   = strategy.cash,
+    default_qty_value  = 40,
+    commission_type    = strategy.commission.percent,
+    commission_value   = 0.1,
+    slippage           = 2,
+    pyramiding         = 0,
+    calc_on_every_tick = false
+)
+
+// ─── Inputs ───────────────────────────────────────────────────────────────────
+grp_regime  = "Regime"
+grp_entry   = "Entry Gate"
+grp_sizing  = "Position Sizing"
+grp_exit    = "Exit Rules"
+grp_display = "Display"
+
+ma_fast      = input.int  (50,    "MA Fast (regime)",       minval=1,   group=grp_regime)
+ma_slow      = input.int  (200,   "MA Slow (regime)",       minval=1,   group=grp_regime)
+
+rsi_period   = input.int  (14,    "RSI Period",             minval=1,   group=grp_entry)
+rsi_buy_thr  = input.int  (38,    "RSI Buy threshold  (≤)", minval=1,  maxval=99, group=grp_entry)
+rsi_sell_thr = input.int  (62,    "RSI Sell threshold (≥)", minval=1,  maxval=99, group=grp_entry)
+
+max_trade_usd = input.float(40.0, "Max trade size (USD)",   minval=1,  group=grp_sizing)
+min_pct      = input.float(0.20,  "Min size (% of max)",   minval=0.1, maxval=1.0, group=grp_sizing)
+allow_shorts = input.bool (true,  "Allow short trades (futures/margin)", group=grp_sizing)
+
+bb_len       = input.int  (20,    "BB Period",              minval=1,   group=grp_exit)
+bb_mult      = input.float(2.0,   "BB Multiplier",          minval=0.1, group=grp_exit)
+atr_period   = input.int  (14,    "ATR Period",             minval=1,   group=grp_exit)
+atr_sl_mult  = input.float(1.5,   "ATR Stop Multiplier",    minval=0.1, group=grp_exit)
+tp_pct       = input.float(5.0,   "Take Profit %",          minval=0.1, group=grp_exit)
+max_hold     = input.int  (72,    "Max hold bars",          minval=1,   group=grp_exit)
+
+show_regime  = input.bool (true,  "Shade regime background",            group=grp_display)
+show_signals = input.bool (true,  "Show entry arrows",                  group=grp_display)
+
+// ─── Indicators ───────────────────────────────────────────────────────────────
+ma50  = ta.sma(close, ma_fast)
+ma200 = ta.sma(close, ma_slow)
+rsi14 = ta.rsi(close, rsi_period)
+
+[bb_upper, bb_mid, bb_lower] = ta.bb(close, bb_len, bb_mult)
+atr14 = ta.atr(atr_period)
+
+// Stochastic RSI  (14,14,3 — same as bot)
+rsi_src    = ta.rsi(close, 14)
+stoch_raw  = ta.stoch(rsi_src, rsi_src, rsi_src, 14)
+stoch_k    = ta.sma(stoch_raw, 3)
+
+vol_avg    = ta.sma(volume, 20)
+vol_ratio  = vol_avg > 0 ? volume / vol_avg : 1.0
+
+// ─── Regime ───────────────────────────────────────────────────────────────────
+death_cross  = ma50 < ma200   // bearish regime → look for BUY (contrarian)
+golden_cross = ma50 >= ma200  // bullish regime → look for SELL (contrarian)
+
+// ─── Entry Gate ───────────────────────────────────────────────────────────────
+buy_gate  = death_cross  and rsi14 <= rsi_buy_thr
+sell_gate = golden_cross and rsi14 >= rsi_sell_thr
+
+// ─── Signal Strength Scoring (mirrors bot's calcSignalStrength) ───────────────
+clamp(v) => math.max(0.0, math.min(1.0, v))
+
+// Buy strength
+rsi_score_b   = buy_gate  ? clamp((rsi_buy_thr - rsi14)       / float(rsi_buy_thr))        : 0.0
+bb_score_b    = buy_gate  ? clamp((bb_lower - close)           / (bb_lower * 0.02))          : 0.0
+stoch_score_b = (buy_gate  and stoch_k < 50) ? clamp((50 - stoch_k) / 50.0)                : 0.0
+vol_score     = vol_ratio >= 1.0 ? clamp((vol_ratio - 1.0) / 3.0)                           : 0.0
+reg_score_b   = death_cross  ? clamp((ma200 - ma50) / ma200 / 0.02)                         : 0.0
+
+// Sell strength
+rsi_score_s   = sell_gate ? clamp((rsi14 - rsi_sell_thr)       / float(100 - rsi_sell_thr)) : 0.0
+bb_score_s    = sell_gate ? clamp((close - bb_upper)            / (bb_upper * 0.02))          : 0.0
+stoch_score_s = (sell_gate and stoch_k > 50) ? clamp((stoch_k - 50) / 50.0)                : 0.0
+reg_score_s   = golden_cross ? clamp((ma50 - ma200) / ma200 / 0.02)                         : 0.0
+
+buy_strength  = (rsi_score_b + bb_score_b + stoch_score_b + vol_score + reg_score_b) / 5.0
+sell_strength = (rsi_score_s + bb_score_s + stoch_score_s + vol_score + reg_score_s) / 5.0
+
+// Trade size: min_pct → 100% of max_trade_usd, scaled by strength
+buy_size_usd  = max_trade_usd * (min_pct + (1.0 - min_pct) * buy_strength)
+sell_size_usd = max_trade_usd * (min_pct + (1.0 - min_pct) * sell_strength)
+
+// ─── Entries ──────────────────────────────────────────────────────────────────
+no_position = strategy.position_size == 0
+
+if buy_gate and no_position
+    strategy.entry("Long", strategy.long, qty = buy_size_usd / close)
+
+if sell_gate and (allow_shorts ? no_position : strategy.position_size > 0)
+    if allow_shorts
+        strategy.entry("Short", strategy.short, qty = sell_size_usd / close)
+    else
+        strategy.close("Long", comment = "Sell signal")
+
+// ─── Exits ────────────────────────────────────────────────────────────────────
+// Long exits
+if strategy.position_size > 0
+    entry_px  = strategy.opentrades.entry_price(0)
+    stop_long = entry_px - atr14 * atr_sl_mult
+    tp_long   = entry_px * (1.0 + tp_pct / 100.0)
+    bars_held = bar_index - strategy.opentrades.entry_bar_index(0)
+
+    strategy.exit("Long SL/TP", "Long",
+         stop    = stop_long,
+         limit   = tp_long,
+         comment = "SL/TP")
+
+    // BB middle reversion (primary target — mirrors bot backtest)
+    if close >= bb_mid
+        strategy.close("Long", comment = "BB Mid ✓")
+
+    // Max hold time-stop
+    if bars_held >= max_hold
+        strategy.close("Long", comment = "Max Hold")
+
+// Short exits
+if strategy.position_size < 0
+    entry_px   = strategy.opentrades.entry_price(0)
+    stop_short = entry_px + atr14 * atr_sl_mult
+    tp_short   = entry_px * (1.0 - tp_pct / 100.0)
+    bars_held  = bar_index - strategy.opentrades.entry_bar_index(0)
+
+    strategy.exit("Short SL/TP", "Short",
+         stop    = stop_short,
+         limit   = tp_short,
+         comment = "SL/TP")
+
+    if close <= bb_mid
+        strategy.close("Short", comment = "BB Mid ✓")
+
+    if bars_held >= max_hold
+        strategy.close("Short", comment = "Max Hold")
+
+// ─── Visuals ──────────────────────────────────────────────────────────────────
+plot(ma50,  "MA 50",  color=color.new(color.blue,   0), linewidth=1)
+plot(ma200, "MA 200", color=color.new(color.orange, 0), linewidth=2)
+
+plot(bb_upper, "BB Upper",  color=color.new(color.gray, 60), linewidth=1)
+plot(bb_mid,   "BB Middle", color=color.new(color.gray, 40), linewidth=1)
+plot(bb_lower, "BB Lower",  color=color.new(color.gray, 60), linewidth=1)
+
+// Regime shading
+bgcolor(show_regime and death_cross  ? color.new(color.red,   93) : na, title="Death Cross Zone")
+bgcolor(show_regime and golden_cross ? color.new(color.green, 93) : na, title="Golden Cross Zone")
+
+// Entry arrows
+plotshape(show_signals and buy_gate,
+     title="Buy Signal", location=location.belowbar,
+     style=shape.triangleup, size=size.small,
+     color=color.new(color.lime, 0), text="B")
+
+plotshape(show_signals and sell_gate,
+     title="Sell Signal", location=location.abovebar,
+     style=shape.triangledown, size=size.small,
+     color=color.new(color.red, 0), text="S")
+
+// Signal strength label on entry bars
+if buy_gate and no_position
+    label.new(bar_index, low,
+         text  = str.tostring(math.round(buy_strength * 100)) + "%",
+         style = label.style_label_up,
+         color = color.new(color.lime, 70),
+         textcolor = color.white, size = size.tiny)
+
+if sell_gate and no_position and allow_shorts
+    label.new(bar_index, high,
+         text  = str.tostring(math.round(sell_strength * 100)) + "%",
+         style = label.style_label_down,
+         color = color.new(color.red, 70),
+         textcolor = color.white, size = size.tiny)
+
+// RSI level line reference (drawn in separate pane via indicator — not here)
+// Use the built-in RSI indicator and add horizontal lines at 38 and 62.

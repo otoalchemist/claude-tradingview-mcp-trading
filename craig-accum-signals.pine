@@ -1,0 +1,180 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// Craig Accumulation Signals
+//
+// Visualises the live bot's full signal stack on a 15-minute chart:
+//   • 1h EMA50 / EMA200 (regime) drawn on 15m chart via request.security()
+//   • Death cross bar   → red background flash + ☠ label
+//   • Golden cross bar  → yellow background flash + ★ label
+//   • Bearish BOS       → red triangle + "bBOS" label  (BUY regime only)
+//   • Bullish BOS       → lime triangle + "uBOS" label (SELL regime only)
+//   • Bullish CHOCH     → bright green arrow + "CHOCH ↑" (BUY final entry)
+//   • Bearish CHOCH     → orange arrow + "CHOCH ↓"    (SELL final exit)
+//   • Regime zone shading: blue tint = BUY / orange tint = SELL
+//
+// HOW TO USE:
+//   1. Set chart to 15-minute timeframe, symbol BTC/ETH/SOL/etc.
+//   2. Open Pine Script Editor → New → paste this → Add to chart
+// ═══════════════════════════════════════════════════════════════════════════
+
+//@version=5
+indicator("Craig Accumulation Signals", overlay=true,
+          max_lines_count=500, max_labels_count=1000)
+
+// ── Inputs ────────────────────────────────────────────────────────────────────
+grpRegime = "Regime (1h EMA)"
+grpExec   = "Execution (15m BOS/CHOCH)"
+grpDisp   = "Display"
+
+emaFast  = input.int(50,  "1h EMA Fast (regime)", minval=1, group=grpRegime)
+emaSlow  = input.int(200, "1h EMA Slow (regime)", minval=1, group=grpRegime)
+swingLB  = input.int(5,   "Swing lookback (bars each side)", minval=1, group=grpExec)
+
+showRegimeEMAs  = input.bool(true,  "Show 1h EMAs",           group=grpDisp)
+showRegimeZone  = input.bool(true,  "Show regime zone (tint)", group=grpDisp)
+showCross       = input.bool(true,  "Show death/golden cross", group=grpDisp)
+showBOS         = input.bool(true,  "Show BOS signals",        group=grpDisp)
+showCHOCH       = input.bool(true,  "Show CHOCH signals",      group=grpDisp)
+showLabels      = input.bool(true,  "Show labels",             group=grpDisp)
+
+// ── 1h EMAs via request.security ─────────────────────────────────────────────
+// FIX (Bug 1): Request the PREVIOUS closed 1h bar's EMA value using [1] inside
+// the security expression with lookahead_on.  This prevents repainting on the
+// live bar — the developing 1h candle is never used to compute crosses.
+ema1hFast = request.security(syminfo.tickerid, "60",
+              ta.ema(close, emaFast)[1], lookahead=barmerge.lookahead_on)
+ema1hSlow = request.security(syminfo.tickerid, "60",
+              ta.ema(close, emaSlow)[1], lookahead=barmerge.lookahead_on)
+
+plot(showRegimeEMAs ? ema1hFast : na, "1h EMA Fast", color=color.new(color.yellow, 20), linewidth=2)
+plot(showRegimeEMAs ? ema1hSlow : na, "1h EMA Slow", color=color.new(color.white,  30), linewidth=2)
+
+// ── Regime detection ─────────────────────────────────────────────────────────
+// FIX (Bug 1 cont.): Explicit prev-bar comparison instead of ta.crossover/under.
+// Since ema1h* already hold the confirmed closed-bar value, ema1h*[1] here is
+// one 15m step back — which within the same 1h period equals the same closed
+// bar value, so the cross fires only once, on the first 15m bar of the new hour.
+isGolden = ema1hFast[1] <= ema1hSlow[1] and ema1hFast > ema1hSlow
+isDeath  = ema1hFast[1] >= ema1hSlow[1] and ema1hFast < ema1hSlow
+
+// Track current regime (persistent state in Pine)
+var int regimeState = 0   // 0=neutral, 1=buy(death), -1=sell(golden)
+if isDeath
+    regimeState := 1
+if isGolden
+    regimeState := -1
+
+// ── Regime zone background ────────────────────────────────────────────────────
+// FIX (Bug 2): Suppress zone colour on cross bars to prevent double-bgcolor
+// blending (zone + flash = muddy colour).  Cross flash takes full priority.
+buyZoneCol  = color.new(color.blue,   90)
+sellZoneCol = color.new(color.orange, 88)
+bgcolor(showRegimeZone and regimeState ==  1 and not isDeath  and not isGolden ? buyZoneCol  : na, title="BUY zone")
+bgcolor(showRegimeZone and regimeState == -1 and not isDeath  and not isGolden ? sellZoneCol : na, title="SELL zone")
+
+// ── Cross markers ─────────────────────────────────────────────────────────────
+bgcolor(showCross and isDeath  ? color.new(color.red,    60) : na, title="Death cross flash")
+bgcolor(showCross and isGolden ? color.new(color.yellow, 55) : na, title="Golden cross flash")
+
+if showCross and isDeath and showLabels
+    label.new(bar_index, high, "☠\nDEATH\nCROSS",
+              color=color.red, textcolor=color.white,
+              style=label.style_label_down, size=size.small)
+
+if showCross and isGolden and showLabels
+    label.new(bar_index, high, "★\nGOLDEN\nCROSS",
+              color=color.yellow, textcolor=color.black,
+              style=label.style_label_down, size=size.small)
+
+// ── 15m Swing pivot detection ─────────────────────────────────────────────────
+// Pine's built-in pivot functions confirm a pivot `lb` bars AFTER it forms.
+pH = ta.pivothigh(high, swingLB, swingLB)  // confirmed swing high
+pL = ta.pivotlow( low,  swingLB, swingLB)  // confirmed swing low
+
+// Track last confirmed pivots
+var float lastSH = na
+var float lastSL = na
+
+if not na(pH)
+    lastSH := pH
+if not na(pL)
+    lastSL := pL
+
+// ── BOS / CHOCH detection ─────────────────────────────────────────────────────
+// Structure tracking: 1 = last break was bullish, -1 = bearish, 0 = neutral
+// NOTE (Bug 3 — known limitation): structure starts at 0 on first chart bar.
+// The very first break in each direction is always labelled BOS, never CHOCH,
+// until both a bullish and bearish break have been seen.  This matches the
+// bot's behaviour (same initialisation).  Disregard labels on the first few
+// regime bars after a chart reload.
+var int structure = 0
+
+bullBreak = not na(lastSH) and close > lastSH and close[1] <= lastSH
+bearBreak = not na(lastSL) and close < lastSL and close[1] >= lastSL
+
+bullBOS   = bullBreak and structure != -1   // continuation up
+bullCHOCH = bullBreak and structure == -1   // flip from bearish → bullish
+bearBOS   = bearBreak and structure != 1    // continuation down
+bearCHOCH = bearBreak and structure == 1    // flip from bullish → bearish
+
+if bullBreak
+    structure := 1
+if bearBreak
+    structure := -1
+
+// ── Plot BOS — only show in relevant regime ───────────────────────────────────
+// BUY regime:  bearish BOS = accumulation entry
+// SELL regime: bullish BOS = distribution entry
+
+plotshape(showBOS and regimeState ==  1 and bearBOS,
+          "Bear BOS (buy)",  shape.triangledown, location.abovebar,
+          color.new(color.red, 0),  size=size.small)
+
+plotshape(showBOS and regimeState == -1 and bullBOS,
+          "Bull BOS (sell)", shape.triangleup,   location.belowbar,
+          color.new(color.lime, 0), size=size.small)
+
+// Neutral — show both for context
+plotshape(showBOS and regimeState == 0 and bearBOS,
+          "Bear BOS (neutral)", shape.triangledown, location.abovebar,
+          color.new(color.fuchsia, 40), size=size.tiny)
+plotshape(showBOS and regimeState == 0 and bullBOS,
+          "Bull BOS (neutral)", shape.triangleup,   location.belowbar,
+          color.new(color.fuchsia, 40), size=size.tiny)
+
+// BOS labels
+if showBOS and showLabels and regimeState == 1 and bearBOS
+    label.new(bar_index, high, "bBOS\n🔴",
+              color=color.new(color.red, 20), textcolor=color.white,
+              style=label.style_label_down, size=size.tiny)
+
+if showBOS and showLabels and regimeState == -1 and bullBOS
+    label.new(bar_index, low, "uBOS\n🟢",
+              color=color.new(color.lime, 20), textcolor=color.black,
+              style=label.style_label_up, size=size.tiny)
+
+// ── Plot CHOCH ────────────────────────────────────────────────────────────────
+plotshape(showCHOCH and bullCHOCH,
+          "Bull CHOCH",  shape.arrowup,   location.belowbar,
+          color.new(color.aqua, 0),   size=size.normal)
+
+plotshape(showCHOCH and bearCHOCH,
+          "Bear CHOCH",  shape.arrowdown, location.abovebar,
+          color.new(color.orange, 0), size=size.normal)
+
+if showCHOCH and showLabels and bullCHOCH
+    label.new(bar_index, low,
+              regimeState == 1 ? "CHOCH ↑\nFINAL BUY ★" : "CHOCH ↑",
+              color=color.aqua, textcolor=color.black,
+              style=label.style_label_up, size=size.small)
+
+if showCHOCH and showLabels and bearCHOCH
+    label.new(bar_index, high,
+              regimeState == -1 ? "CHOCH ↓\nFINAL SELL ★" : "CHOCH ↓",
+              color=color.orange, textcolor=color.white,
+              style=label.style_label_down, size=size.small)
+
+// ── Pivot markers (dimmed — for context) ─────────────────────────────────────
+plotshape(not na(pH), "Swing High", shape.xcross, location.abovebar,
+          color.new(color.red, 60), size=size.tiny)
+plotshape(not na(pL), "Swing Low",  shape.xcross, location.belowbar,
+          color.new(color.lime, 60), size=size.tiny)

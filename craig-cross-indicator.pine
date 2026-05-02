@@ -1,0 +1,123 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// Craig Cross Signals — Small & Large Golden/Death Cross Vertical Lines
+//
+// HOW TO USE:
+//   1. Open Pine Script Editor in TradingView
+//   2. Click "Add to chart" (adds as OVERLAY on the price chart)
+//   3. Paste and apply
+//
+// SIGNALS (vertical lines + background flash):
+//   • Small Golden Cross : EMA9  crosses above EMA21  — lime green line
+//   • Small Death Cross  : EMA9  crosses below EMA21  — red line
+//   • Large Golden Cross : EMA50 crosses above EMA200 — bright yellow line (thicker)
+//   • Large Death Cross  : EMA50 crosses below EMA200 — orange line (thicker)
+//
+// STRATEGY CONTEXT:
+//   In the Craig cross-regime contrarian strategy:
+//   • Small death cross  + bearish CHOCH → BUY regime  (buy bearish BOS)
+//   • Small golden cross + bullish CHOCH → SELL regime (sell bullish BOS)
+// ═══════════════════════════════════════════════════════════════════════════
+
+//@version=5
+indicator("Craig Cross Signals", overlay=true,
+  max_lines_count=500, max_labels_count=500)
+
+// ─── Inputs ───────────────────────────────────────────────────────────────────
+grpSmall = "Small Cross"
+grpLarge = "Large Cross"
+grpDisp  = "Display"
+
+fastSmall = input.int(9,   "Fast EMA", minval=1, group=grpSmall)
+slowSmall = input.int(21,  "Slow EMA", minval=1, group=grpSmall)
+fastLarge = input.int(50,  "Fast EMA", minval=1, group=grpLarge)
+slowLarge = input.int(200, "Slow EMA", minval=1, group=grpLarge)
+
+showSmallCross = input.bool(true, "Show Small Cross Lines",  group=grpDisp)
+showLargeCross = input.bool(true, "Show Large Cross Lines",  group=grpDisp)
+showEMAs       = input.bool(true, "Show EMA Lines",          group=grpDisp)
+showLabels     = input.bool(true, "Show Labels",             group=grpDisp)
+lineExtMult    = input.float(3.0, "Line Height (× ATR)",    minval=1.0, maxval=10.0, step=0.5, group=grpDisp)
+
+// ─── Colors ───────────────────────────────────────────────────────────────────
+colSmallGolden = color.new(color.lime,       0)
+colSmallDeath  = color.new(color.red,        0)
+colLargeGolden = color.new(color.yellow,     0)
+colLargeDeath  = color.new(color.orange,     0)
+
+colEmaFastS    = color.new(color.lime,      30)
+colEmaSlowS    = color.new(color.red,       30)
+colEmaFastL    = color.new(color.yellow,    20)
+colEmaSlowL    = color.new(color.white,     30)
+
+// ─── EMA Calculations ─────────────────────────────────────────────────────────
+emaFS = ta.ema(close, fastSmall)
+emaSS = ta.ema(close, slowSmall)
+emaFL = ta.ema(close, fastLarge)
+emaSL = ta.ema(close, slowLarge)
+
+// ─── Cross Detection ──────────────────────────────────────────────────────────
+smallGolden = ta.crossover( emaFS, emaSS)
+smallDeath  = ta.crossunder(emaFS, emaSS)
+largeGolden = ta.crossover( emaFL, emaSL)
+largeDeath  = ta.crossunder(emaFL, emaSL)
+
+// ─── EMA Plots ────────────────────────────────────────────────────────────────
+plot(showEMAs ? emaFS : na, "EMA Fast Small",  color=colEmaFastS, linewidth=1)
+plot(showEMAs ? emaSS : na, "EMA Slow Small",  color=colEmaSlowS, linewidth=1)
+plot(showEMAs ? emaFL : na, "EMA Fast Large",  color=colEmaFastL, linewidth=2)
+plot(showEMAs ? emaSL : na, "EMA Slow Large",  color=colEmaSlowL, linewidth=2)
+
+// ─── Vertical Lines ───────────────────────────────────────────────────────────
+// Uses ATR to make lines taller than the candle so they're clearly visible.
+// extend.both on a vertical line (x1==x2) stretches it to fill the full pane.
+atr14 = ta.atr(14)
+lineTop = high + atr14 * lineExtMult
+lineBot = low  - atr14 * lineExtMult
+
+if showSmallCross
+    if smallGolden
+        line.new(bar_index, lineTop, bar_index, lineBot,
+                 color=colSmallGolden, width=2, style=line.style_solid, extend=extend.both)
+        if showLabels
+            label.new(bar_index, lineTop, "⚡ Small\nGolden",
+                      color=colSmallGolden, textcolor=color.black,
+                      style=label.style_label_down, size=size.small)
+
+    if smallDeath
+        line.new(bar_index, lineTop, bar_index, lineBot,
+                 color=colSmallDeath, width=2, style=line.style_solid, extend=extend.both)
+        if showLabels
+            label.new(bar_index, lineBot, "☠ Small\nDeath",
+                      color=colSmallDeath, textcolor=color.white,
+                      style=label.style_label_up, size=size.small)
+
+if showLargeCross
+    if largeGolden
+        line.new(bar_index, lineTop, bar_index, lineBot,
+                 color=colLargeGolden, width=4, style=line.style_solid, extend=extend.both)
+        if showLabels
+            label.new(bar_index, lineTop, "★ LARGE\nGOLDEN",
+                      color=colLargeGolden, textcolor=color.black,
+                      style=label.style_label_down, size=size.normal)
+
+    if largeDeath
+        line.new(bar_index, lineTop, bar_index, lineBot,
+                 color=colLargeDeath, width=4, style=line.style_solid, extend=extend.both)
+        if showLabels
+            label.new(bar_index, lineBot, "★ LARGE\nDEATH",
+                      color=colLargeDeath, textcolor=color.white,
+                      style=label.style_label_up, size=size.normal)
+
+// ─── Background Flash on Cross Bar ────────────────────────────────────────────
+// Subtle tint so the bar itself is clearly marked even when zoomed out.
+// Gated by the same show toggles as the lines.
+bgLarge = showLargeCross and largeGolden ? color.new(color.yellow, 60) : showLargeCross and largeDeath ? color.new(color.orange, 60) : na
+bgSmall = showSmallCross and smallGolden ? color.new(color.lime,   75) : showSmallCross and smallDeath ? color.new(color.red,    75) : na
+bgCol   = na(bgLarge) ? bgSmall : bgLarge
+bgcolor(bgCol, title="Cross Flash")
+
+// ─── Plotshape Markers (gated by show toggles) ────────────────────────────────
+plotshape(showSmallCross and smallGolden, "Small Golden ▲", shape.triangleup,   location.belowbar, colSmallGolden, size=size.small)
+plotshape(showSmallCross and smallDeath,  "Small Death ▼",  shape.triangledown, location.abovebar, colSmallDeath,  size=size.small)
+plotshape(showLargeCross and largeGolden, "Large Golden ▲", shape.triangleup,   location.belowbar, colLargeGolden, size=size.normal)
+plotshape(showLargeCross and largeDeath,  "Large Death ▼",  shape.triangledown, location.abovebar, colLargeDeath,  size=size.normal)

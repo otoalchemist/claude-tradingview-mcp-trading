@@ -1,0 +1,977 @@
+#!/usr/bin/env node
+// ═══════════════════════════════════════════════════════════════════════════
+// craig-accumulation-bot.mjs  — Live Paper Trading  (v2)
+//
+// STRATEGY (per-symbol timeframes):
+//   BTC-USD  : 1h  EMA50/200 regime  →  15m BOS/CHOCH execution
+//   ETH-USD  : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
+//   SOL-USD  : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
+//   LINK-USD : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
+//   AKT-USD  : 15m EMA50/200 regime  →   1m BOS/CHOCH execution
+//   PEPE-USD : 15m EMA50/200 regime  →   1m BOS/CHOCH execution
+//
+//   Death cross  → BUY  regime: scale-in  on each bearish BOS / bullish CHOCH
+//   Golden cross → SELL regime: scale-out on each bullish BOS / bearish CHOCH
+//   Scale ladder : [8, 12, 18, 27]% of regime-start capital — UNLIMITED slots
+//   CHOCH        : continues scale (same per-slot %; no all-in)
+//
+// REPORTS  : 6-hour check-in (00, 06, 12, 18 UTC) + EOD at 23:55 UTC via Telegram
+// COMMANDS : /status  /report  /trades  /help  (reply in Telegram chat)
+// STATE    : craig-state-{SYMBOL}.json  (saved after every bar for crash safety)
+// TRADES   : craig-accum-trades.jsonl   (append-only trade log)
+// ═══════════════════════════════════════════════════════════════════════════
+
+import "dotenv/config";
+import { readFileSync, writeFileSync, existsSync, appendFileSync } from "fs";
+
+// ── Time constants ────────────────────────────────────────────────────────────
+const HOUR_MS        = 3_600_000;
+const THIRTY_MIN_MS  = 1_800_000;
+const FIFTEEN_MIN_MS =   900_000;
+
+// ── Config ────────────────────────────────────────────────────────────────────
+const SYMBOLS              = ["BTC-USD", "ETH-USD", "SOL-USD", "LINK-USD", "AKT-USD", "PEPE-USD"];
+const INITIAL_CAPITAL      = 500;
+const EMA_FAST             = 50;
+const EMA_SLOW             = 200;
+const SWING_LB             = 5;
+const BOS_SCALE_PCT        = [8, 12, 18, 27];
+const REQUIRE_BOS_BEFORE_CHOCH = true;
+const CHOCH_CONTINUE_SCALE     = true;
+const SCAN_INTERVAL_MS     = 5 * 60 * 1000;   // scan every 5 min
+const CB_MAX               = 350;
+const TRADES_LOG           = "craig-accum-trades.jsonl";
+const WARMUP               = SWING_LB * 2 + 2;
+
+// Per-symbol execution / regime config
+const SYMBOL_CONFIG = {
+  "BTC-USD": {
+    exec:  { gran: "FIFTEEN_MINUTE", secs:  900, bars: 250, label: "15m" },
+    regime:{ gran: "ONE_HOUR",       secs: 3600, bars: 400, ms: HOUR_MS,       label: "1h"  },
+  },
+  "ETH-USD": {
+    exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
+    regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 250, ms: THIRTY_MIN_MS, label: "30m" },
+  },
+  "SOL-USD": {
+    exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
+    regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 250, ms: THIRTY_MIN_MS,  label: "30m" },
+  },
+  "LINK-USD": {
+    exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
+    regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 250, ms: THIRTY_MIN_MS,  label: "30m" },
+  },
+  "AKT-USD": {
+    exec:  { gran: "ONE_MINUTE",     secs:   60, bars: 300, label: "1m"  },
+    regime:{ gran: "FIFTEEN_MINUTE", secs:  900, bars: 250, ms: FIFTEEN_MIN_MS, label: "15m" },
+  },
+  "PEPE-USD": {
+    exec:  { gran: "ONE_MINUTE",     secs:   60, bars: 300, label: "1m"  },
+    regime:{ gran: "FIFTEEN_MINUTE", secs:  900, bars: 250, ms: FIFTEEN_MIN_MS, label: "15m" },
+  },
+};
+
+// ── Telegram ──────────────────────────────────────────────────────────────────
+let tgOffset       = 0;       // tracks last processed update_id for getUpdates polling
+const BOT_START_MS = Date.now();
+let lastScanTime   = 0;       // epoch ms when last scan completed
+let lastScanMs     = 0;       // duration of last scan in ms
+let scanInProgress = false;   // prevents concurrent scan cycles
+
+async function sendTelegram(msg) {
+  const token  = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) return;
+  try {
+    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text: msg, parse_mode: "HTML" }),
+    });
+  } catch (e) { console.error("Telegram error:", e.message); }
+}
+
+// ── Adaptive price / qty formatters (handles PEPE micro-prices) ───────────────
+function fPrice(n) {
+  if (!n || n === 0)        return "$0";
+  if (Math.abs(n) >= 1)     return "$" + n.toFixed(2);
+  if (Math.abs(n) >= 0.01)  return "$" + n.toFixed(4);
+  if (Math.abs(n) >= 0.001) return "$" + n.toFixed(5);
+  return "$" + n.toFixed(8);
+}
+function fQty(n) {
+  if (Math.abs(n) >= 1000) return n.toFixed(2);
+  if (Math.abs(n) >= 1)    return n.toFixed(4);
+  return n.toFixed(8);
+}
+
+// ── Candle fetch ──────────────────────────────────────────────────────────────
+async function fetchCandles(symbol, gran, secs, numBars) {
+  let allCandles = [];
+  let batchEnd   = Math.floor(Date.now() / 1000);
+  let emptyCount = 0;
+  const need     = numBars + 20;
+
+  while (allCandles.length < need) {
+    const batchSize  = Math.min(CB_MAX, need - allCandles.length);
+    const batchStart = batchEnd - batchSize * secs;
+    const url = `https://api.coinbase.com/api/v3/brokerage/market/products/${symbol}/candles`
+      + `?start=${batchStart}&end=${batchEnd}&granularity=${gran}&limit=${batchSize}`;
+
+    const res  = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+    if (!res.ok) throw new Error(`Coinbase ${res.status} for ${symbol} ${gran}`);
+    const json = await res.json();
+
+    if (!json.candles?.length) {
+      if (++emptyCount >= 2) break;
+      batchEnd = batchStart;
+      continue;
+    }
+    emptyCount = 0;
+
+    const batch = json.candles.slice().reverse().map(c => ({
+      t: parseInt(c.start) * 1000,
+      o: parseFloat(c.open),
+      h: parseFloat(c.high),
+      l: parseFloat(c.low),
+      c: parseFloat(c.close),
+    }));
+    allCandles = [...batch, ...allCandles];
+    batchEnd   = batchStart;
+  }
+
+  const seen = new Set();
+  return allCandles
+    .filter(c => { if (seen.has(c.t)) return false; seen.add(c.t); return true; })
+    .sort((a, b) => a.t - b.t)
+    .slice(-numBars);
+}
+
+// ── EMA ───────────────────────────────────────────────────────────────────────
+function calcEMA(closes, period) {
+  const out = new Array(closes.length).fill(null);
+  const k   = 2 / (period + 1);
+  let ema   = null;
+  for (let i = 0; i < closes.length; i++) {
+    if (ema === null) {
+      if (i < period - 1) continue;
+      ema = closes.slice(i - period + 1, i + 1).reduce((s, v) => s + v, 0) / period;
+    } else {
+      ema = closes[i] * k + ema * (1 - k);
+    }
+    out[i] = ema;
+  }
+  return out;
+}
+
+// ── Regime map builder (generic — works for any candle period) ────────────────
+// Keys are the CLOSE time of each regime candle = candle.t + periodMs
+function buildRegime(candles, periodMs) {
+  const closes   = candles.map(c => c.c);
+  const emaF     = calcEMA(closes, EMA_FAST);
+  const emaS     = calcEMA(closes, EMA_SLOW);
+  const crossMap = new Map();
+  const stateMap = new Map();
+
+  for (let i = 1; i < candles.length; i++) {
+    const ef = emaF[i], es = emaS[i], efP = emaF[i - 1], esP = emaS[i - 1];
+    if (!ef || !es || !efP || !esP) continue;
+    const closeTime = candles[i].t + periodMs;
+    stateMap.set(closeTime, ef > es ? "golden" : "death");
+    if      (efP <= esP && ef > es) crossMap.set(closeTime, "golden");
+    else if (efP >= esP && ef < es) crossMap.set(closeTime, "death");
+  }
+  return { crossMap, stateMap };
+}
+
+// ── State persistence ─────────────────────────────────────────────────────────
+function stateFile(symbol) { return `craig-state-${symbol}.json`; }
+
+function makeFreshState(symbol) {
+  const cfg = SYMBOL_CONFIG[symbol];
+  return {
+    symbol,
+    execGran:             cfg.exec.gran,   // detect timeframe migrations on restart
+    initialized:          false,
+    regime:               "neutral",
+    bosCount:             0,
+    cash:                 INITIAL_CAPITAL,
+    cryptoQty:            0,
+    regimeStartCapital:   INITIAL_CAPITAL,
+    regimeStartCryptoQty: 0,
+    regimeStartPrice:     0,               // price when current regime started (for HODL comparison)
+    lastPrice:            0,               // most recent bar close (for portfolio valuation)
+    structure:            0,
+    lastSH:               null,
+    lastSL:               null,
+    lastProcessedBarT:    0,
+    trades:               [],
+    regimeCount:          { buy: 0, sell: 0 },
+  };
+}
+
+function loadState(symbol) {
+  const f = stateFile(symbol);
+  if (!existsSync(f)) return makeFreshState(symbol);
+  try {
+    const state = JSON.parse(readFileSync(f, "utf8"));
+    const cfg   = SYMBOL_CONFIG[symbol];
+    if (state.execGran !== cfg.exec.gran) {
+      console.log(`[${symbol}] Exec TF changed (${state.execGran ?? "unknown"} → ${cfg.exec.gran}) — resetting state`);
+      return makeFreshState(symbol);
+    }
+    // Back-fill new fields for states saved before they were added
+    if (!("lastPrice"            in state)) state.lastPrice            = 0;
+    if (!("regimeStartPrice"     in state)) state.regimeStartPrice     = 0;
+    if (!("regimeStartCryptoQty" in state)) state.regimeStartCryptoQty = 0;
+    return state;
+  } catch {
+    return makeFreshState(symbol);
+  }
+}
+
+function saveState(symbol, state) {
+  writeFileSync(stateFile(symbol), JSON.stringify(state, null, 2));
+}
+
+function appendTrade(entry) {
+  appendFileSync(TRADES_LOG, JSON.stringify(entry) + "\n");
+}
+
+// ── Process one symbol ────────────────────────────────────────────────────────
+async function processSymbol(symbol) {
+  const cfg = SYMBOL_CONFIG[symbol];
+  let state;
+  try {
+    state = loadState(symbol);
+  } catch (e) {
+    console.error(`[${symbol}] State load error: ${e.message}`);
+    return;
+  }
+
+  let candlesExec, candlesRegime;
+  try {
+    [candlesExec, candlesRegime] = await Promise.all([
+      fetchCandles(symbol, cfg.exec.gran,   cfg.exec.secs,   cfg.exec.bars),
+      fetchCandles(symbol, cfg.regime.gran, cfg.regime.secs, cfg.regime.bars),
+    ]);
+  } catch (e) {
+    console.error(`[${symbol}] Fetch error: ${e.message}`);
+    return;
+  }
+
+  if (candlesExec.length < 50 || candlesRegime.length < 220) {
+    console.log(`[${symbol}] Insufficient candles — skipping (exec:${candlesExec.length} regime:${candlesRegime.length})`);
+    return;
+  }
+
+  const { crossMap, stateMap } = buildRegime(candlesRegime, cfg.regime.ms);
+
+  // ── On first run: detect current regime ──────────────────────────────────
+  if (!state.initialized) {
+    const lastBar     = candlesExec.at(-1);
+    const periodMs    = cfg.regime.ms;
+    const recentClose = Math.floor(lastBar.t / periodMs) * periodMs;
+    const initS       = stateMap.get(recentClose);
+
+    if (initS === "death") {
+      state.regime             = "buy";
+      state.regimeStartCapital = state.cash;
+      state.regimeStartPrice   = lastBar.c;
+      state.regimeCount.buy++;
+    } else if (initS === "golden") {
+      state.regime                = "sell";
+      state.regimeStartCryptoQty  = state.cryptoQty;
+      state.regimeStartPrice      = lastBar.c;
+      state.regimeCount.sell++;
+    } else {
+      state.regime = "neutral";
+    }
+
+    state.lastPrice         = lastBar.c;
+    state.lastProcessedBarT = lastBar.t;
+    state.initialized       = true;
+    saveState(symbol, state);
+
+    const now = new Date().toISOString().slice(0, 16);
+    console.log(`[${symbol}] ✓ Init | regime=${state.regime} | $${state.cash.toFixed(2)} | exec:${cfg.exec.label} regime:${cfg.regime.label} | ${now}`);
+    await sendTelegram(
+      `🤖 <b>Craig Accum Bot — ${symbol}</b>\n` +
+      `Initialized | Regime: ${state.regime.toUpperCase()}\n` +
+      `Cash: $${state.cash.toFixed(2)} | Crypto: ${state.cryptoQty.toFixed(6)}\n` +
+      `Exec: ${cfg.exec.label} | Regime TF: ${cfg.regime.label} EMA${EMA_FAST}/${EMA_SLOW}`
+    );
+    return;
+  }
+
+  // ── Process bars newer than last processed ────────────────────────────────
+  const newBars = candlesExec.filter(b => b.t > state.lastProcessedBarT);
+  if (!newBars.length) {
+    console.log(`[${symbol}] No new ${cfg.exec.label} bars since ${new Date(state.lastProcessedBarT).toISOString().slice(11, 16)} UTC`);
+    return;
+  }
+
+  const alerts = [];
+  const f2     = n => n.toFixed(2);   // USD amounts only
+  const fP     = n => fPrice(n);      // prices (adaptive for micro-prices)
+  const fQ     = n => fQty(n);        // quantities (adaptive for large PEPE qty)
+  const tToIdx = new Map(candlesExec.map((b, i) => [b.t, i]));
+
+  for (const bar of newBars) {
+    const i = tToIdx.get(bar.t);
+
+    // Always update lastPrice and advance pointer, even for warmup bars
+    state.lastPrice         = bar.c;
+    state.lastProcessedBarT = bar.t;
+
+    if (i === undefined || i < WARMUP) { saveState(symbol, state); continue; }
+
+    // ── 1. Confirm pivot at i−SWING_LB ──────────────────────────────────────
+    const pIdx = i - SWING_LB;
+    if (pIdx >= SWING_LB) {
+      const pb = candlesExec[pIdx];
+      let isPH = true, isPL = true;
+      for (let j = 1; j <= SWING_LB; j++) {
+        const prev = candlesExec[pIdx - j];
+        const next = candlesExec[pIdx + j];
+        if (!prev || !next) { isPH = isPL = false; break; }
+        if (prev.h >= pb.h || next.h >= pb.h) isPH = false;
+        if (prev.l <= pb.l || next.l <= pb.l) isPL = false;
+      }
+      if (isPH && (!state.lastSH || pb.t >= state.lastSH.t)) state.lastSH = { price: pb.h, t: pb.t };
+      if (isPL && (!state.lastSL || pb.t >= state.lastSL.t)) state.lastSL = { price: pb.l, t: pb.t };
+    }
+
+    // ── 2. BOS / CHOCH detection ─────────────────────────────────────────────
+    // BUY  regime signals: bearBOS (buy the dip) | bullCHOCH (buy the reversal)
+    // SELL regime signals: bullBOS (sell the rally) | bearCHOCH (sell the reversal)
+    let bullBOS = false, bearBOS = false, bullCHOCH = false, bearCHOCH = false;
+    if (state.lastSH && state.lastSL && i > 0) {
+      const pc = candlesExec[i - 1].c;
+      if (bar.c > state.lastSH.price && pc <= state.lastSH.price) {
+        if (state.structure === -1) bullCHOCH = true; else bullBOS = true;
+        state.structure = 1;
+      }
+      if (bar.c < state.lastSL.price && pc >= state.lastSL.price) {
+        if (state.structure === 1) bearCHOCH = true; else bearBOS = true;
+        state.structure = -1;
+      }
+    }
+
+    // ── 3. Regime change check ────────────────────────────────────────────────
+    // Checked at each regime-candle boundary (every 1h for BTC, every 30m for ETH/SOL)
+    if (bar.t % cfg.regime.ms === 0) {
+      const cross = crossMap.get(bar.t);
+      if (cross === "death" && state.regime !== "buy") {
+        state.regime             = "buy";
+        state.bosCount           = 0;
+        state.regimeStartCapital = state.cash + state.cryptoQty * bar.c;
+        state.regimeStartPrice   = bar.c;
+        state.regimeCount.buy++;
+        const msg = `☠️ <b>${symbol}</b> DEATH CROSS → BUY REGIME\n@ ${fP(bar.c)} | Capital: $${f2(state.regimeStartCapital)}`;
+        console.log(`[${symbol}] DEATH CROSS → BUY @ ${fP(bar.c)} | capital $${f2(state.regimeStartCapital)}`);
+        alerts.push(msg);
+        appendTrade({ symbol, t: bar.t, type: "regime", to: "buy",  price: bar.c, ts: new Date(bar.t).toISOString() });
+      } else if (cross === "golden" && state.regime !== "sell") {
+        state.regime                = "sell";
+        state.bosCount              = 0;
+        state.regimeStartCryptoQty  = state.cryptoQty;
+        state.regimeStartPrice      = bar.c;
+        state.regimeCount.sell++;
+        const msg = `⭐ <b>${symbol}</b> GOLDEN CROSS → SELL REGIME\n@ ${fP(bar.c)} | Crypto: ${fQ(state.regimeStartCryptoQty)}`;
+        console.log(`[${symbol}] GOLDEN CROSS → SELL @ ${fP(bar.c)} | qty ${fQ(state.regimeStartCryptoQty)}`);
+        alerts.push(msg);
+        appendTrade({ symbol, t: bar.t, type: "regime", to: "sell", price: bar.c, ts: new Date(bar.t).toISOString() });
+      }
+    }
+
+    // ── 4. Trade execution ───────────────────────────────────────────────────
+    const dateStr = new Date(bar.t).toISOString().slice(0, 16).replace("T", " ");
+
+    // Allocation % — clamps to last slot (27%) for all signals beyond the initial 4
+    const slotPct = idx => BOS_SCALE_PCT[Math.min(idx, BOS_SCALE_PCT.length - 1)];
+
+    // ── BUY regime ────────────────────────────────────────────────────────────
+    if (state.regime === "buy") {
+
+      // Scaled BOS buy — UNLIMITED: no slot cap; slots 5+ repeat at 27%
+      if (bearBOS && state.cash > 0.01) {
+        const buyUSD = Math.min((state.regimeStartCapital * slotPct(state.bosCount)) / 100, state.cash);
+        if (buyUSD > 0.01) {
+          const qty = buyUSD / bar.c;
+          state.cash      -= buyUSD;
+          state.cryptoQty += qty;
+          state.bosCount++;
+          const trade = { symbol, t: bar.t, type: "scaled_buy", bosNum: state.bosCount,
+                          price: bar.c, usd: buyUSD, qty, ts: new Date(bar.t).toISOString() };
+          state.trades.push(trade);
+          appendTrade(trade);
+          const msg = `🟢 <b>${symbol}</b> BUY #${state.bosCount} (bearish BOS)\n@ ${fP(bar.c)} | $${f2(buyUSD)} | ${fQ(qty)}\nCash: $${f2(state.cash)} | ${dateStr}`;
+          console.log(`[${symbol}] BUY #${state.bosCount} (BOS) @ ${fP(bar.c)} | $${f2(buyUSD)} | cash $${f2(state.cash)}`);
+          alerts.push(msg);
+        }
+      }
+
+      // CHOCH buy — continues scale; slots 5+ repeat at 27%
+      const chochBuyArmed = !REQUIRE_BOS_BEFORE_CHOCH || state.bosCount >= 1;
+      if (CHOCH_CONTINUE_SCALE && bullCHOCH && chochBuyArmed && state.cash > 0.01) {
+        const buyUSD = Math.min((state.regimeStartCapital * slotPct(state.bosCount)) / 100, state.cash);
+        if (buyUSD > 0.01) {
+          const qty = buyUSD / bar.c;
+          state.cash      -= buyUSD;
+          state.cryptoQty += qty;
+          state.bosCount++;
+          const trade = { symbol, t: bar.t, type: "choch_buy", bosNum: state.bosCount,
+                          price: bar.c, usd: buyUSD, qty, ts: new Date(bar.t).toISOString() };
+          state.trades.push(trade);
+          appendTrade(trade);
+          const msg = `🟢✦ <b>${symbol}</b> BUY #${state.bosCount} (bullish CHOCH)\n@ ${fP(bar.c)} | $${f2(buyUSD)} | ${fQ(qty)}\nCash: $${f2(state.cash)} | ${dateStr}`;
+          console.log(`[${symbol}] BUY #${state.bosCount} (CHOCH) @ ${fP(bar.c)} | $${f2(buyUSD)}`);
+          alerts.push(msg);
+        }
+      }
+    }
+
+    // ── SELL regime ───────────────────────────────────────────────────────────
+    if (state.regime === "sell") {
+
+      // Scaled BOS sell — UNLIMITED: no slot cap; slots 5+ repeat at 27%
+      if (bullBOS && state.cryptoQty > 1e-10) {
+        const sellQty = Math.min((state.regimeStartCryptoQty * slotPct(state.bosCount)) / 100, state.cryptoQty);
+        if (sellQty > 1e-10) {
+          const usd = sellQty * bar.c;
+          state.cash      += usd;
+          state.cryptoQty -= sellQty;
+          state.bosCount++;
+          const trade = { symbol, t: bar.t, type: "scaled_sell", bosNum: state.bosCount,
+                          price: bar.c, usd, qty: sellQty, ts: new Date(bar.t).toISOString() };
+          state.trades.push(trade);
+          appendTrade(trade);
+          const msg = `🔴 <b>${symbol}</b> SELL #${state.bosCount} (bullish BOS)\n@ ${fP(bar.c)} | $${f2(usd)} | ${fQ(sellQty)}\nCash: $${f2(state.cash)} | ${dateStr}`;
+          console.log(`[${symbol}] SELL #${state.bosCount} (BOS) @ ${fP(bar.c)} | $${f2(usd)} | cash $${f2(state.cash)}`);
+          alerts.push(msg);
+        }
+      }
+
+      // CHOCH sell — continues scale; slots 5+ repeat at 27%
+      const chochSellArmed = !REQUIRE_BOS_BEFORE_CHOCH || state.bosCount >= 1;
+      if (CHOCH_CONTINUE_SCALE && bearCHOCH && chochSellArmed && state.cryptoQty > 1e-10) {
+        const sellQty = Math.min((state.regimeStartCryptoQty * slotPct(state.bosCount)) / 100, state.cryptoQty);
+        if (sellQty > 1e-10) {
+          const usd = sellQty * bar.c;
+          state.cash      += usd;
+          state.cryptoQty -= sellQty;
+          state.bosCount++;
+          const trade = { symbol, t: bar.t, type: "choch_sell", bosNum: state.bosCount,
+                          price: bar.c, usd, qty: sellQty, ts: new Date(bar.t).toISOString() };
+          state.trades.push(trade);
+          appendTrade(trade);
+          const msg = `🔴✦ <b>${symbol}</b> SELL #${state.bosCount} (bearish CHOCH)\n@ ${fP(bar.c)} | $${f2(usd)} | ${fQ(sellQty)}\nCash: $${f2(state.cash)} | ${dateStr}`;
+          console.log(`[${symbol}] SELL #${state.bosCount} (CHOCH) @ ${fP(bar.c)} | $${f2(usd)}`);
+          alerts.push(msg);
+        }
+      }
+    }
+
+    // Save state after every bar — prevents duplicate trades on crash/restart
+    saveState(symbol, state);
+  }
+
+  // Send batched Telegram alerts
+  if (alerts.length) {
+    await sendTelegram(alerts.join("\n\n"));
+  }
+}
+
+// ── Periodic reporting ────────────────────────────────────────────────────────
+let lastSixHourSummaryHour = -1;   // UTC hour (0/6/12/18) of last 6h summary sent
+let lastEodSentDate        = "";   // "YYYY-MM-DD" of last EOD report sent
+
+function buildSymbolReport(symbol) {
+  let s;
+  try { s = loadState(symbol); } catch { return `<b>${symbol}</b> — state unavailable`; }
+  if (!s.initialized) return `<b>${symbol}</b> — not yet initialized`;
+
+  const cfg       = SYMBOL_CONFIG[symbol];
+  const price     = s.lastPrice || 0;
+  const portVal   = s.cash + s.cryptoQty * price;
+  const pnlPct    = ((portVal - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100);
+  const pnlSign   = pnlPct >= 0 ? "+" : "";
+
+  // HODL comparison from regime start
+  let hodlLine = "";
+  if (s.regimeStartPrice > 0 && price > 0) {
+    const hodlPct      = ((price / s.regimeStartPrice) - 1) * 100;
+    const edgePct      = pnlPct - hodlPct;
+    const hodlSign     = hodlPct >= 0 ? "+" : "";
+    const edgeSign     = edgePct >= 0 ? "+" : "";
+    hodlLine = `\nHODL (regime): ${hodlSign}${hodlPct.toFixed(1)}%  │  Edge: ${edgeSign}${edgePct.toFixed(1)}%`;
+  }
+
+  // Deployment progress
+  let deployLine = "";
+  if (s.regime === "buy") {
+    const deployedPct = (s.cryptoQty * price) / (portVal || 1) * 100;
+    deployLine = `\nDeployed: ${deployedPct.toFixed(0)}% in crypto  │  Signals: ${s.bosCount}`;
+  } else if (s.regime === "sell") {
+    const soldPct = s.regimeStartCryptoQty > 0
+      ? (1 - s.cryptoQty / s.regimeStartCryptoQty) * 100 : 0;
+    deployLine = `\nDistributed: ${soldPct.toFixed(0)}% of crypto  │  Signals: ${s.bosCount}`;
+  }
+
+  // Today's trades
+  const todayDate = new Date().toISOString().slice(0, 10);
+  const todayTrades = s.trades.filter(t => t.ts?.startsWith(todayDate));
+
+  // Last 2 trades
+  const recentLines = s.trades.slice(-2).map(t => {
+    const dt   = new Date(t.t).toISOString().slice(5, 16).replace("T", " ");
+    const icon = t.type.includes("buy") ? "🟢" : "🔴";
+    const tag  = t.type === "scaled_buy"   ? `BUY  #${t.bosNum}  (BOS)`
+               : t.type === "choch_buy"    ? `BUY  #${t.bosNum}  (CHOCH)`
+               : t.type === "scaled_sell"  ? `SELL #${t.bosNum}  (BOS)`
+               : t.type === "choch_sell"   ? `SELL #${t.bosNum}  (CHOCH)`
+               : t.type;
+    return `  ${icon} ${tag} @ ${fPrice(t.price)} | ${dt}`;
+  }).join("\n");
+
+  // Contextual analysis
+  const notes = [];
+  if (s.regime !== "neutral" && s.bosCount === 0 && s.trades.length === 0)
+    notes.push("⏳ No trades yet — awaiting first BOS signal");
+  if (s.regime === "buy" && s.cash < 10)
+    notes.push("💰 Near fully deployed — capital working");
+  if (s.regime === "sell" && s.cryptoQty < 1e-8)
+    notes.push("💰 Fully distributed — cash secured");
+  if (s.regime === "neutral")
+    notes.push("⏸️ No regime established — EMA still warming up");
+
+  // Data freshness
+  const barAgeMin = s.lastProcessedBarT
+    ? Math.floor((Date.now() - s.lastProcessedBarT) / 60_000) : null;
+  const freshStr = barAgeMin !== null
+    ? (barAgeMin < 10 ? `  🟢 ${barAgeMin}m ago` : `  🟡 ${barAgeMin}m ago`) : "";
+
+  return (
+    `<b>${symbol}</b>  [${s.regime.toUpperCase()}]  ${cfg.exec.label}/${cfg.regime.label}${freshStr}\n` +
+    `Value: $${portVal.toFixed(2)}  (${pnlSign}${pnlPct.toFixed(2)}%)  @ ${fPrice(price)}` +
+    hodlLine +
+    deployLine +
+    `\nToday: ${todayTrades.length} trade${todayTrades.length !== 1 ? "s" : ""}  │  Total: ${s.trades.length}  │  Cycles: ${s.regimeCount.buy}B/${s.regimeCount.sell}S` +
+    (recentLines ? `\nRecent:\n${recentLines}` : "") +
+    (notes.length ? `\n${notes.join("\n")}` : "")
+  );
+}
+
+async function sendPortfolioReport(isEod = false) {
+  const now     = new Date();
+  const timeStr = now.toISOString().slice(0, 16).replace("T", " ") + " UTC";
+
+  let totalPortVal = 0;
+  const symbolBlocks = [];
+
+  for (const symbol of SYMBOLS) {
+    try {
+      const s = loadState(symbol);
+      const p = s.lastPrice || 0;
+      totalPortVal += s.initialized ? s.cash + s.cryptoQty * p : INITIAL_CAPITAL;
+      symbolBlocks.push(buildSymbolReport(symbol));
+    } catch {
+      totalPortVal += INITIAL_CAPITAL;
+      symbolBlocks.push(`<b>${symbol}</b> — error reading state`);
+    }
+  }
+
+  const totalStart  = SYMBOLS.length * INITIAL_CAPITAL;
+  const totalPnlPct = ((totalPortVal - totalStart) / totalStart * 100);
+  const totalSign   = totalPnlPct >= 0 ? "+" : "";
+
+  const header = isEod
+    ? `📊 <b>END OF DAY  ─  ${now.toISOString().slice(0, 10)}</b>\n${timeStr}`
+    : `📈 <b>6H CHECK-IN  ─  ${timeStr}</b>`;
+
+  const footer =
+    `\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `<b>TOTAL: $${totalPortVal.toFixed(2)} / $${totalStart}  (${totalSign}${totalPnlPct.toFixed(2)}%)</b>`;
+
+  await sendTelegram(header + "\n\n" + symbolBlocks.join("\n\n") + footer);
+  console.log(`[Report] Sent ${isEod ? "EOD" : "6h"} report @ ${timeStr}`);
+}
+
+async function checkAndSendReports() {
+  const now       = new Date();
+  const hourUTC   = now.getUTCHours();
+  const minuteUTC = now.getUTCMinutes();
+  const dateStr   = now.toISOString().slice(0, 10);
+
+  // 6-hour check-ins at 00:00, 06:00, 12:00, 18:00 UTC
+  // Fire on the first scan within 10 minutes of each boundary
+  if (hourUTC % 6 === 0 && minuteUTC < 10 && lastSixHourSummaryHour !== hourUTC) {
+    await sendPortfolioReport(false);
+    lastSixHourSummaryHour = hourUTC;
+  }
+
+  // End-of-day report at 23:55 UTC
+  if (hourUTC === 23 && minuteUTC >= 55 && lastEodSentDate !== dateStr) {
+    await sendPortfolioReport(true);
+    lastEodSentDate = dateStr;
+  }
+}
+
+// ── Telegram command: today's trades list ────────────────────────────────────
+async function sendTodaysTrades() {
+  const todayDate = new Date().toISOString().slice(0, 10);
+  const lines     = [];
+  let   totalCount = 0;
+
+  for (const symbol of SYMBOLS) {
+    try {
+      const s      = loadState(symbol);
+      const today  = s.trades.filter(t => t.ts?.startsWith(todayDate));
+      totalCount  += today.length;
+      if (!today.length) { lines.push(`<b>${symbol}</b> — no trades today`); continue; }
+      const rows = today.map(t => {
+        const dt   = new Date(t.t).toISOString().slice(11, 16);
+        const icon = t.type.includes("buy") ? "🟢" : "🔴";
+        const side = t.type === "scaled_buy"  ? `BUY  #${t.bosNum} BOS`
+                   : t.type === "choch_buy"   ? `BUY  #${t.bosNum} CHOCH`
+                   : t.type === "scaled_sell" ? `SELL #${t.bosNum} BOS`
+                   : t.type === "choch_sell"  ? `SELL #${t.bosNum} CHOCH`
+                   : t.type;
+        return `  ${icon} ${side.padEnd(16)} ${fPrice(t.price).padStart(14)}  ${dt} UTC`;
+      });
+      lines.push(`<b>${symbol}</b>  (${today.length} trade${today.length !== 1 ? "s" : ""})\n<code>${rows.join("\n")}</code>`);
+    } catch {
+      lines.push(`<b>${symbol}</b> — error reading state`);
+    }
+  }
+
+  const header = `📋 <b>TODAY'S TRADES  ─  ${todayDate}</b>`;
+  const footer = `\n<b>${totalCount} total trade${totalCount !== 1 ? "s" : ""} today</b>`;
+  await sendTelegram(header + "\n\n" + lines.join("\n\n") + footer);
+}
+
+// ── Telegram commands: new handlers ──────────────────────────────────────────
+
+async function sendPing() {
+  const ms  = Date.now() - BOT_START_MS;
+  const h   = Math.floor(ms / 3_600_000);
+  const m   = Math.floor((ms % 3_600_000) / 60_000);
+  const s   = Math.floor((ms % 60_000) / 1000);
+  const uptime = h > 0 ? `${h}h ${m}m ${s}s` : m > 0 ? `${m}m ${s}s` : `${s}s`;
+
+  const lastStr = lastScanTime
+    ? `${new Date(lastScanTime).toISOString().slice(11, 19)} UTC  (${(lastScanMs / 1000).toFixed(1)}s)`
+    : "not yet";
+  const nextMs  = lastScanTime
+    ? Math.ceil(lastScanTime / SCAN_INTERVAL_MS) * SCAN_INTERVAL_MS : null;
+  const nextStr = nextMs ? new Date(nextMs).toISOString().slice(11, 16) + " UTC" : "soon";
+
+  await sendTelegram(
+    `🏓 <b>Pong — Bot is alive</b>\n\n` +
+    `Uptime    : ${uptime}\n` +
+    `Last scan : ${lastStr}\n` +
+    `Next scan : ~${nextStr}\n` +
+    `Symbols   : ${SYMBOLS.length}  [${SYMBOLS.map(s => s.replace("-USD","")).join(" · ")}]\n` +
+    `Capital   : $${INITIAL_CAPITAL}/sym  ($${SYMBOLS.length * INITIAL_CAPITAL} total)\n` +
+    `Scale     : [${BOS_SCALE_PCT.join(", ")}]%  UNLIMITED slots`
+  );
+}
+
+async function sendPrices() {
+  const lines = SYMBOLS.map(sym => {
+    try {
+      const s   = loadState(sym);
+      const cfg = SYMBOL_CONFIG[sym];
+      const icon  = s.regime === "buy" ? "☠️" : s.regime === "sell" ? "⭐" : "⏸ ";
+      const name  = sym.replace("-USD","").padEnd(5);
+      const price = fPrice(s.lastPrice || 0).padStart(15);
+      const reg   = s.regime.toUpperCase().padEnd(7);
+      return `${icon} ${name} ${price}  [${reg}]  ${cfg.exec.label}/${cfg.regime.label}`;
+    } catch { return `❌ ${sym}  error`; }
+  });
+  const t = new Date().toISOString().slice(11, 19) + " UTC";
+  await sendTelegram(`💰 <b>PRICES  ─  ${t}</b>\n\n<code>${lines.join("\n")}</code>`);
+}
+
+async function sendRegimeOverview() {
+  const lines = [];
+  let totalVal = 0;
+  for (const sym of SYMBOLS) {
+    try {
+      const s     = loadState(sym);
+      const price = s.lastPrice || 0;
+      const val   = s.cash + s.cryptoQty * price;
+      totalVal   += val;
+      const icon  = s.regime === "buy" ? "☠️" : s.regime === "sell" ? "⭐" : "⏸ ";
+      const name  = sym.replace("-USD","").padEnd(5);
+      const reg   = s.regime.toUpperCase().padEnd(7);
+      const pnl   = ((val - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100);
+      const pnlS  = (pnl >= 0 ? "+" : "") + pnl.toFixed(2) + "%";
+      let detail  = "";
+      if (s.regime === "buy") {
+        const dep = s.cryptoQty * price;
+        const pct = val > 0 ? (dep / val * 100).toFixed(0) : 0;
+        detail = `dep:${pct}% sig:${s.bosCount}`;
+      } else if (s.regime === "sell") {
+        const sp = s.regimeStartCryptoQty > 0
+          ? ((1 - s.cryptoQty / s.regimeStartCryptoQty) * 100).toFixed(0) : "—";
+        detail = `sold:${sp}% sig:${s.bosCount}`;
+      }
+      lines.push(`${icon} ${name} [${reg}] $${val.toFixed(2)} (${pnlS})  ${detail}`);
+    } catch { lines.push(`❌ ${sym}  error`); }
+  }
+  const totalStart = SYMBOLS.length * INITIAL_CAPITAL;
+  const totalPnl   = ((totalVal - totalStart) / totalStart * 100);
+  const t = new Date().toISOString().slice(11, 19) + " UTC";
+  await sendTelegram(
+    `📡 <b>REGIME OVERVIEW  ─  ${t}</b>\n\n` +
+    `<code>${lines.join("\n")}</code>\n\n` +
+    `<b>Portfolio: $${totalVal.toFixed(2)} / $${totalStart}  (${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)}%)</b>`
+  );
+}
+
+async function sendTradeHistory() {
+  const all = [];
+  for (const sym of SYMBOLS) {
+    try {
+      const s = loadState(sym);
+      for (const t of s.trades) all.push({ ...t, symbol: sym });
+    } catch {}
+  }
+  all.sort((a, b) => b.t - a.t);
+  const recent = all.slice(0, 20);
+
+  if (!recent.length) {
+    await sendTelegram(`📜 <b>Trade History</b>\n\nNo trades yet across all symbols.`);
+    return;
+  }
+  const rows = recent.map(t => {
+    const dt   = new Date(t.t).toISOString().slice(5, 16).replace("T", " ");
+    const sym  = t.symbol.replace("-USD","").padEnd(5);
+    const icon = t.type.includes("buy") ? "🟢" : "🔴";
+    const side = t.type === "scaled_buy"  ? `B#${t.bosNum} BOS  `
+               : t.type === "choch_buy"   ? `B#${t.bosNum} CHOCH`
+               : t.type === "scaled_sell" ? `S#${t.bosNum} BOS  `
+               : t.type === "choch_sell"  ? `S#${t.bosNum} CHOCH`
+               : t.type.padEnd(12);
+    return `${icon} ${sym} ${side}  ${fPrice(t.price).padStart(12)}  ${dt}`;
+  });
+  await sendTelegram(
+    `📜 <b>TRADE HISTORY  ─  last ${recent.length} of ${all.length}</b>\n\n` +
+    `<code>${rows.join("\n")}</code>`
+  );
+}
+
+async function sendHelpMessage() {
+  await sendTelegram(
+    `🤖 <b>Craig Accum Bot v2 — Commands</b>\n\n` +
+    `<b>Status &amp; Prices</b>\n` +
+    `/ping  /p   — Health: uptime, last scan, next scan\n` +
+    `/price /px  — Live prices + regime for all symbols\n` +
+    `/status /s  — Regime overview + P&amp;L table\n` +
+    `/report /r  — Full detailed report (all symbols)\n\n` +
+    `<b>Trades</b>\n` +
+    `/trades /t  — Today's trades by symbol\n` +
+    `/hist       — Last 20 trades across all symbols\n\n` +
+    `<b>Per Symbol</b>\n` +
+    `/btc  /eth  /sol  /link  /akt  /pepe  — Symbol snapshot\n\n` +
+    `<b>Control</b>\n` +
+    `/scan /sc   — Trigger immediate scan now\n` +
+    `/help /h    — This message\n\n` +
+    `⏰ Auto-reports: 00/06/12/18 UTC  +  EOD 23:55 UTC`
+  );
+}
+
+// ── Telegram command poller (long-poll getUpdates) ────────────────────────────
+// Listens for incoming messages in the authorized chat and dispatches commands.
+// Runs as an independent async loop — never blocks the scan cycle.
+async function startTelegramPoller() {
+  const token  = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) {
+    console.log("[Telegram] No credentials — command polling disabled");
+    return;
+  }
+
+  console.log("[Telegram] Command polling started (long-poll, 25s timeout)");
+
+  // Drain any queued updates from before this session so stale commands aren't re-run
+  try {
+    const drain = await fetch(
+      `https://api.telegram.org/bot${token}/getUpdates?offset=-1&limit=1`,
+      { signal: AbortSignal.timeout(8_000) }
+    );
+    const dj = await drain.json();
+    if (dj.result?.length) tgOffset = dj.result[dj.result.length - 1].update_id + 1;
+  } catch {}
+
+  while (true) {
+    try {
+      const url = `https://api.telegram.org/bot${token}/getUpdates`
+        + `?offset=${tgOffset}&timeout=25&allowed_updates=%5B%22message%22%5D`;
+      const res  = await fetch(url, { signal: AbortSignal.timeout(32_000) });
+      if (!res.ok) { await new Promise(r => setTimeout(r, 5_000)); continue; }
+      const json = await res.json();
+
+      for (const update of json.result ?? []) {
+        tgOffset = update.update_id + 1;
+
+        const msg  = update.message;
+        if (!msg) continue;
+        // Only respond to the authorized chat
+        if (String(msg.chat.id) !== String(chatId)) continue;
+
+        const text = (msg.text || "").trim().toLowerCase().split("@")[0];  // strip @botname suffix
+        console.log(`[Telegram] Command received: "${text}"`);
+
+        // Per-symbol shortcuts
+        const SHORTCUTS = { "/btc":"BTC-USD", "/eth":"ETH-USD", "/sol":"SOL-USD", "/link":"LINK-USD", "/akt":"AKT-USD", "/pepe":"PEPE-USD" };
+
+        if      (text === "/ping"    || text === "/p")  { await sendPing(); }
+        else if (text === "/price"   || text === "/px") { await sendPrices(); }
+        else if (text === "/status"  || text === "/s")  { await sendRegimeOverview(); }
+        else if (text === "/report"  || text === "/r")  { await sendPortfolioReport(false); }
+        else if (text === "/regime"  || text === "/rg") { await sendRegimeOverview(); }
+        else if (text === "/trades"  || text === "/t")  { await sendTodaysTrades(); }
+        else if (text === "/hist"    || text === "/history") { await sendTradeHistory(); }
+        else if (text === "/scan"    || text === "/sc") {
+          if (scanInProgress) {
+            await sendTelegram("⏳ Scan already in progress — please wait.");
+          } else {
+            await sendTelegram("🔄 Manual scan triggered...");
+            runCycle().catch(e => sendTelegram(`❌ Scan error: ${e.message}`));
+          }
+        } else if (SHORTCUTS[text]) {
+          await sendTelegram(buildSymbolReport(SHORTCUTS[text]));
+        } else if (text === "/help"  || text === "/h")  { await sendHelpMessage(); }
+        else if (text.startsWith("/")) {
+          await sendTelegram(`❓ Unknown: <code>${text}</code>\nSend /help for all commands.`);
+        }
+      }
+    } catch (e) {
+      // Suppress expected timeout noise from AbortSignal; log real errors
+      if (!e.message?.includes("abort") && !e.message?.includes("Abort")) {
+        console.error("[Telegram] Poll error:", e.message);
+      }
+      await new Promise(r => setTimeout(r, 5_000));
+    }
+  }
+}
+
+// ── Console status table ──────────────────────────────────────────────────────
+function printStatus() {
+  const sep = "─".repeat(76);
+  console.log(`\n${sep}`);
+  console.log(`  ${new Date().toISOString().slice(0, 19)} UTC  │  Craig Accum Bot v2  │  Paper Trading`);
+  console.log(sep);
+  console.log(`  ${"Symbol".padEnd(10)} ${"Regime".padEnd(8)} ${"Cash".padStart(10)} ${"Crypto".padStart(14)} ${"Sigs".padStart(6)} ${"Trades".padStart(8)}  Regimes`);
+  console.log(`  ${"-".repeat(70)}`);
+  for (const symbol of SYMBOLS) {
+    try {
+      const s = loadState(symbol);
+      if (!s.initialized) { console.log(`  ${symbol.padEnd(10)} not yet initialized`); continue; }
+      const cfg = SYMBOL_CONFIG[symbol];
+      const price    = s.lastPrice || 0;
+      const portVal  = s.cash + s.cryptoQty * price;
+      const pnlPct   = ((portVal - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100).toFixed(1);
+      const pnlStr   = (pnlPct >= 0 ? "+" : "") + pnlPct + "%";
+      console.log(
+        `  ${symbol.padEnd(10)}` +
+        ` ${s.regime.padEnd(8)}` +
+        ` $${s.cash.toFixed(2).padStart(9)}` +
+        ` ${s.cryptoQty.toFixed(6).padStart(14)}` +
+        ` ${String(s.bosCount).padStart(6)}` +
+        ` ${String(s.trades.length).padStart(8)}` +
+        `  (${s.regimeCount.buy}B/${s.regimeCount.sell}S)  ${pnlStr}`
+      );
+    } catch {}
+  }
+  console.log("");
+}
+
+// ── Main loop ─────────────────────────────────────────────────────────────────
+async function runCycle() {
+  if (scanInProgress) {
+    console.log("⚠  Scan already in progress — skipping duplicate cycle");
+    return;
+  }
+  scanInProgress = true;
+  const start = Date.now();
+  console.log(`\n⏱  Scanning ${SYMBOLS.length} symbols @ ${new Date().toISOString().slice(0, 19)} UTC`);
+
+  try {
+    for (const symbol of SYMBOLS) {
+      try {
+        await processSymbol(symbol);
+      } catch (e) {
+        console.error(`[${symbol}] Unhandled error: ${e.message}`);
+      }
+      await new Promise(r => setTimeout(r, 1200));   // brief pause between symbols
+    }
+
+    lastScanMs   = Date.now() - start;
+    lastScanTime = Date.now();
+
+    printStatus();
+    console.log(`  Cycle done in ${(lastScanMs / 1000).toFixed(1)}s — next scan in 5 min`);
+
+    // Send 6h / EOD reports if scheduled
+    await checkAndSendReports();
+  } finally {
+    scanInProgress = false;
+  }
+}
+
+async function main() {
+  console.log("\n" + "═".repeat(66));
+  console.log("  Craig Accumulation Bot  v2  —  PAPER TRADING");
+  console.log("═".repeat(66));
+  for (const sym of SYMBOLS) {
+    const c = SYMBOL_CONFIG[sym];
+    console.log(`  ${sym.padEnd(9)}  exec: ${c.exec.label.padEnd(4)}  regime: ${c.regime.label.padEnd(4)}  EMA${EMA_FAST}/${EMA_SLOW}`);
+  }
+  console.log(`  Scale   : [${BOS_SCALE_PCT.join(", ")}]%  │  UNLIMITED slots (5+ repeat at ${BOS_SCALE_PCT.at(-1)}%)`);
+  console.log(`  Reports : 6h check-in (00/06/12/18 UTC)  +  EOD at 23:55 UTC`);
+  console.log(`  Commands: /ping /price /status /report /trades /hist /scan /btc /eth /sol /link /akt /pepe /help`);
+  console.log(`  Capital : $${INITIAL_CAPITAL}/symbol  │  Scan: every 5 min`);
+  console.log("═".repeat(66) + "\n");
+
+  await sendTelegram(
+    `🤖 <b>Craig Accumulation Bot v2 — STARTED</b>\n` +
+    `BTC:  1h  regime / 15m exec\n` +
+    `ETH:  30m regime /  5m exec\n` +
+    `SOL:  30m regime /  5m exec\n` +
+    `LINK: 30m regime /  5m exec\n` +
+    `AKT:  15m regime /  1m exec\n` +
+    `PEPE: 15m regime /  1m exec\n` +
+    `Scale: [${BOS_SCALE_PCT.join(", ")}]%  │  UNLIMITED slots (5+ @ ${BOS_SCALE_PCT.at(-1)}%)\n` +
+    `Reports: every 6h + EOD at 23:55 UTC\n` +
+    `Commands: /ping /price /status /report /trades /hist /scan\n` +
+    `Per symbol: /btc /eth /sol /link /akt /pepe  │  /help for full list\n` +
+    `Capital: $${INITIAL_CAPITAL}/symbol  │  📝 PAPER TRADING`
+  );
+
+  // Start Telegram command listener (independent loop, never awaited)
+  startTelegramPoller().catch(e => console.error("[Telegram] Poller crashed:", e.message));
+
+  // Initial scan
+  await runCycle();
+
+  // Align subsequent scans to 5-min clock boundaries (:00, :05, :10 …)
+  const nowMs  = Date.now();
+  const nextMs = Math.ceil(nowMs / SCAN_INTERVAL_MS) * SCAN_INTERVAL_MS;
+  const waitMs = nextMs - nowMs;
+  console.log(`  Next aligned scan in ${Math.round(waitMs / 1000)}s`);
+
+  setTimeout(async function loop() {
+    await runCycle();
+    setTimeout(loop, SCAN_INTERVAL_MS);
+  }, waitMs);
+}
+
+main().catch(async err => {
+  console.error("Fatal:", err);
+  await sendTelegram(`❌ Craig Accum Bot crashed: ${err.message}`);
+  process.exit(1);
+});

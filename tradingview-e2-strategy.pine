@@ -1,0 +1,105 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0
+// © Claude E2 Swing Ensemble
+
+//@version=5
+indicator("E2 Swing Ensemble", overlay=true, max_labels_count=500)
+
+// ─── Inputs ────────────────────────────────────────────────────────────────────
+emaPeriodFast  = input.int(50,  "EMA Fast (trend)",   minval=1)
+emaPeriodSlow  = input.int(200, "EMA Slow (baseline)", minval=1)
+rsiPeriod      = input.int(14,  "RSI Period",          minval=1)
+don20Period    = input.int(20,  "Donchian Entry (bars)", minval=5)
+don10Period    = input.int(10,  "Donchian Exit  (bars)", minval=3)
+atrPeriod      = input.int(14,  "ATR Period",           minval=1)
+tpMult         = input.float(5.0, "TP ATR Multiplier", minval=1.0, step=0.5)
+rsiOversold    = input.int(30,  "RSI Oversold (Leg B death cross)", minval=1,  maxval=50)
+rsiPullback    = input.int(45,  "RSI Pullback  (Leg B golden cross)", minval=1, maxval=60)
+
+// ─── Indicators ────────────────────────────────────────────────────────────────
+ema50  = ta.ema(close, emaPeriodFast)
+ema200 = ta.ema(close, emaPeriodSlow)
+rsi14  = ta.rsi(close, rsiPeriod)
+atr14  = ta.atr(atrPeriod)
+
+// Donchian Channels
+don20High = ta.highest(high, don20Period)[1]   // [1] = exclude current bar (use completed bars only)
+don10Low  = ta.lowest(low,  don10Period)[1]
+
+// ─── Regime ────────────────────────────────────────────────────────────────────
+inGoldenCross = ema50 > ema200
+inDeathCross  = ema50 < ema200
+
+// ─── Leg A — Donchian-GC Trend Entry / Exit ───────────────────────────────────
+legA_entry = inGoldenCross
+           and close > don20High
+           and close > ema50
+
+// Leg A exit: close below Donchian-10 low
+legA_exit_don = close < don10Low
+
+// ─── Leg B — Hybrid Mean-Reversion Entry ─────────────────────────────────────
+legB_entry_dc = inDeathCross and rsi14 <= rsiOversold          // death cross oversold
+legB_entry_gc = inGoldenCross and close < ema50 and rsi14 <= rsiPullback // GC pullback
+
+legB_entry = legB_entry_dc or legB_entry_gc
+
+// ─── TP Level (indicative, based on current ATR) ─────────────────────────────
+tp_level = close + tpMult * atr14
+
+// ─── Plots ─────────────────────────────────────────────────────────────────────
+
+// EMA lines
+ema50_color  = inGoldenCross ? color.new(#00c853, 0) : color.new(#ff1744, 0)
+plot(ema50,  "EMA 50",  color=ema50_color,  linewidth=2)
+plot(ema200, "EMA 200", color=color.new(color.white, 30), linewidth=2, style=plot.style_line)
+
+// Donchian Channel (20-bar entry, 10-bar exit)
+don20HighPlot = plot(don20High, "Don-20 High (entry)", color=color.new(color.blue, 60),  linewidth=1, style=plot.style_stepline)
+don10LowPlot  = plot(don10Low,  "Don-10 Low  (exit)",  color=color.new(color.orange, 60), linewidth=1, style=plot.style_stepline)
+fill(don20HighPlot, don10LowPlot, color=color.new(color.blue, 92), title="Donchian Zone")
+
+// Regime background shading
+bgcolor(inGoldenCross ? color.new(color.green, 96) : color.new(color.red, 96), title="Regime")
+
+// ─── Buy Signals ───────────────────────────────────────────────────────────────
+
+// Leg A: Donchian breakout in GC
+plotshape(legA_entry, title="Leg A — Trend Entry",
+  style=shape.triangleup, location=location.belowbar,
+  color=color.new(#00c853, 0), size=size.normal, text="A▲")
+
+// Leg B: Mean-rev oversold (death cross)
+plotshape(legB_entry_dc, title="Leg B — Death Cross Dip",
+  style=shape.triangleup, location=location.belowbar,
+  color=color.new(#ffab00, 0), size=size.small, text="B▲DC")
+
+// Leg B: Pullback in golden cross
+plotshape(legB_entry_gc, title="Leg B — GC Pullback",
+  style=shape.triangleup, location=location.belowbar,
+  color=color.new(#29b6f6, 0), size=size.small, text="B▲GC")
+
+// ─── Exit Signals ──────────────────────────────────────────────────────────────
+
+// Leg A: Donchian-10 trailing exit
+plotshape(legA_exit_don, title="Leg A — Don-10 Exit",
+  style=shape.triangledown, location=location.abovebar,
+  color=color.new(#ff6d00, 0), size=size.small, text="A▼")
+
+// ─── TP Line (projected from current close) ───────────────────────────────────
+// Shows where the 5×ATR target is from the current price
+plot(inGoldenCross or inDeathCross ? tp_level : na,
+  "TP target (5×ATR)", color=color.new(color.lime, 50),
+  linewidth=1, style=plot.style_circles)
+
+// ─── RSI Panel (separate pane) ────────────────────────────────────────────────
+// Note: RSI is shown in a separate pane via the RSI indicator below.
+// Add the built-in RSI indicator separately with: period=14, overbought=70, oversold=30
+
+// ─── Labels for key levels ────────────────────────────────────────────────────
+// Show regime label on last bar
+if barstate.islast
+    regime_text = inGoldenCross ? "✨ GOLDEN CROSS" : "☠️ DEATH CROSS"
+    regime_col  = inGoldenCross ? color.green : color.red
+    label.new(bar_index, high * 1.001, regime_text,
+      color=color.new(regime_col, 80), textcolor=regime_col,
+      style=label.style_label_down, size=size.small)

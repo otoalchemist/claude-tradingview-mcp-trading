@@ -6,6 +6,10 @@ craig-portfolio.json
 craig-log.json
 node_modules/
 
+# Runtime state & trade data (machine-local, not for version control)
+craig-state-*.json
+craig-accum-trades.jsonl
+
 # Screenshots
 *.png
 

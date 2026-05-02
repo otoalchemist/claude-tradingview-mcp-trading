@@ -1,0 +1,128 @@
+//@version=5
+// MCC v2 Bot Strategy — Overlay
+// Matches bot.js exactly: MA50/MA200 regime, EMA9/21, BB(20,2), VWAP ±2σ
+// Entry signals when composite score ≥ 0.30 (same threshold as deployed bot)
+indicator("MCC v2 Bot Strategy", overlay=true, max_bars_back=500, max_labels_count=200)
+
+// ─── Inputs ───────────────────────────────────────────────────────────────────
+showMAs      = input.bool(true,  "Show MA50 / MA200",    group="Display")
+showEMAs     = input.bool(true,  "Show EMA9 / EMA21",    group="Display")
+showBB       = input.bool(true,  "Show Bollinger Bands", group="Display")
+showVWAP     = input.bool(true,  "Show VWAP ±2σ",        group="Display")
+showSignals  = input.bool(true,  "Show Entry Signals",   group="Display")
+showRegimeBG = input.bool(true,  "Shade Regime BG",      group="Display")
+showTP       = input.bool(true,  "Show TP Level",        group="Display")
+minScore     = input.float(0.30, "Min Entry Score",      group="Strategy", minval=0.05, maxval=1.0, step=0.05)
+
+// ─── Core Indicators ──────────────────────────────────────────────────────────
+ma50  = ta.sma(close, 50)
+ma200 = ta.sma(close, 200)
+ema9  = ta.ema(close, 9)
+ema21 = ta.ema(close, 21)
+
+[bbMiddle, bbUpper, bbLower] = ta.bb(close, 20, 2)
+
+// VWAP with ±2σ (session-reset, matching bot's daily UTC reset)
+vwapVal    = ta.vwap(hlc3)
+vwapDev    = ta.stdev(hlc3, 20)
+vwapUpper2 = vwapVal + 2 * vwapDev
+vwapLower2 = vwapVal - 2 * vwapDev
+
+rsi14     = ta.rsi(close, 14)
+stochK    = ta.stoch(rsi14, rsi14, rsi14, 14)  // StochRSI (bot uses 14,14,3)
+stochSmooth = ta.sma(stochK, 3)
+
+[macdLine, signalLine, macdHist] = ta.macd(close, 12, 26, 9)
+macdImproving = macdHist > macdHist[1]
+
+cci20  = ta.cci(close, 20)
+volAvg = ta.sma(volume, 20)
+volRatio = volAvg != 0 ? volume / volAvg : 1.0
+
+atr14 = ta.atr(14)
+
+// ─── Regime ───────────────────────────────────────────────────────────────────
+goldenCross = ma50 > ma200   // sell-only mode
+deathCross  = ma50 < ma200   // buy-only mode
+regimeGap   = math.abs(ma50 - ma200) / ma200
+
+// ─── Composite Score — matches calcEntryScore() in bot.js exactly ─────────────
+cl(v) => math.max(0.0, math.min(1.0, v))
+
+// BULL scores (death cross → buy)
+s_rsi_bull    = rsi14 != na    ? cl((40   - rsi14)     / 40)               : 0.0
+s_stoch_bull  = stochSmooth != na ? cl((25 - stochSmooth) / 25)            : 0.0
+s_bb_bull     = bbLower != 0   ? cl((bbLower - close)   / (bbLower * 0.015)) : 0.0
+s_vwap_bull   = vwapLower2 != 0 ? cl((vwapLower2 - close) / (vwapLower2 * 0.01)) : 0.0
+s_macd_bull   = macdImproving  ? 1.0 : 0.0
+s_vol_bull    = cl((volRatio - 1.0) / 1.5)
+s_cci_bull    = cci20 != na    ? cl((-80  - cci20)     / 120)              : 0.0
+s_ema_bull    = ema21 != 0     ? cl((ema21 - ema9)     / ema21 / 0.003)   : 0.0
+s_regime_bull = deathCross     ? cl(regimeGap / 0.02)                      : 0.0
+bullScore = (s_rsi_bull + s_stoch_bull + s_bb_bull + s_vwap_bull + s_macd_bull + s_vol_bull + s_cci_bull + s_ema_bull + s_regime_bull) / 9
+
+// BEAR scores (golden cross → sell)
+s_rsi_bear    = rsi14 != na    ? cl((rsi14     - 60)   / 40)               : 0.0
+s_stoch_bear  = stochSmooth != na ? cl((stochSmooth - 75) / 25)            : 0.0
+s_bb_bear     = bbUpper != 0   ? cl((close - bbUpper)   / (bbUpper * 0.015)) : 0.0
+s_vwap_bear   = vwapUpper2 != 0 ? cl((close - vwapUpper2) / (vwapUpper2 * 0.01)) : 0.0
+s_macd_bear   = not macdImproving ? 1.0 : 0.0
+s_vol_bear    = cl((volRatio - 1.0) / 1.5)
+s_cci_bear    = cci20 != na    ? cl((cci20     - 80)   / 120)              : 0.0
+s_ema_bear    = ema21 != 0     ? cl((ema9  - ema21)    / ema21 / 0.003)   : 0.0
+s_regime_bear = goldenCross    ? cl(regimeGap / 0.02)                      : 0.0
+bearScore = (s_rsi_bear + s_stoch_bear + s_bb_bear + s_vwap_bear + s_macd_bear + s_vol_bear + s_cci_bear + s_ema_bear + s_regime_bear) / 9
+
+// ─── Signals ──────────────────────────────────────────────────────────────────
+buySignal  = deathCross  and bullScore >= minScore
+sellSignal = goldenCross and bearScore >= minScore
+
+// ─── Regime Background ────────────────────────────────────────────────────────
+bgcolor(showRegimeBG and deathCross  ? color.new(color.green, 93) : na, title="Death Cross BG (buy mode)")
+bgcolor(showRegimeBG and goldenCross ? color.new(color.red,   93) : na, title="Golden Cross BG (sell mode)")
+
+// ─── MA50 / MA200 ─────────────────────────────────────────────────────────────
+plot(showMAs ? ma50  : na, "MA50",  color=color.new(color.blue,  0), linewidth=2)
+plot(showMAs ? ma200 : na, "MA200", color=color.new(color.red,   0), linewidth=2)
+
+// ─── EMA9 / EMA21 ─────────────────────────────────────────────────────────────
+plot(showEMAs ? ema9  : na, "EMA9",  color=color.new(color.aqua,   0), linewidth=1)
+plot(showEMAs ? ema21 : na, "EMA21", color=color.new(color.orange, 0), linewidth=1)
+
+// ─── Bollinger Bands ──────────────────────────────────────────────────────────
+bbU = plot(showBB ? bbUpper  : na, "BB Upper",  color=color.new(color.gray, 40), linewidth=1)
+bbL = plot(showBB ? bbLower  : na, "BB Lower",  color=color.new(color.gray, 40), linewidth=1)
+plot(showBB ? bbMiddle : na, "BB Mid", color=color.new(color.gray, 60), linewidth=1, style=plot.style_circles)
+fill(bbU, bbL, color=color.new(color.gray, 92))
+
+// ─── VWAP ±2σ ─────────────────────────────────────────────────────────────────
+plot(showVWAP ? vwapVal    : na, "VWAP",      color=color.new(color.purple, 0),  linewidth=2)
+plot(showVWAP ? vwapUpper2 : na, "VWAP +2σ", color=color.new(color.purple, 50), linewidth=1, style=plot.style_line)
+plot(showVWAP ? vwapLower2 : na, "VWAP -2σ", color=color.new(color.purple, 50), linewidth=1, style=plot.style_line)
+
+// ─── Entry Signals ────────────────────────────────────────────────────────────
+scoreVal    = deathCross ? bullScore : bearScore
+scorePct    = str.tostring(math.round(scoreVal * 100)) + "%"
+
+plotshape(showSignals and buySignal,  "BUY Signal",  shape.triangleup,   location.belowbar, color.new(color.green, 0), size=size.small, text="BUY")
+plotshape(showSignals and sellSignal, "SELL Signal", shape.triangledown, location.abovebar, color.new(color.red,   0), size=size.small, text="SELL")
+
+// Score label on signal bars
+if showSignals and buySignal
+    label.new(bar_index, low - atr14 * 1.5, scorePct,
+      color=color.new(color.green, 20), textcolor=color.white,
+      style=label.style_label_up, size=size.tiny)
+
+if showSignals and sellSignal
+    label.new(bar_index, high + atr14 * 1.5, scorePct,
+      color=color.new(color.red, 20), textcolor=color.white,
+      style=label.style_label_down, size=size.tiny)
+
+// ─── Take Profit Level ────────────────────────────────────────────────────────
+var float tpLine = na
+if buySignal
+    tpLine := close + 3 * atr14
+if sellSignal
+    tpLine := close - 3 * atr14
+
+plot(showTP ? tpLine : na, "TP (3×ATR)", color=color.new(color.yellow, 30), linewidth=1, style=plot.style_cross)
