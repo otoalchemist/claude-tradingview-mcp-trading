@@ -24,6 +24,7 @@
 
 import "dotenv/config";
 import { readFileSync, writeFileSync, renameSync, existsSync, appendFileSync } from "fs";
+import crypto from "crypto";
 
 // ── Time constants ────────────────────────────────────────────────────────────
 const HOUR_MS        = 3_600_000;
@@ -47,6 +48,22 @@ const WARMUP               = SWING_LB * 2 + 2;
 const MAX_TRADES_IN_STATE  = 500;              // cap trades[] in state file to prevent unbounded growth
 const MIN_ORDER_USD        = 1.00;             // minimum buy size (raise to exchange minimum before live)
 const MIN_ORDER_QTY        = 1e-8;             // minimum sell qty (dust threshold)
+
+// ── Live trading flag ─────────────────────────────────────────────────────────
+// Set LIVE_TRADING=true in .env to place real orders on Coinbase Advanced Trade.
+// When false (default), all trades are simulated at bar-close price — paper mode.
+const LIVE_TRADING = process.env.LIVE_TRADING === "true";
+
+// Coinbase base-size decimal precision per symbol (for sell orders)
+// Coinbase rejects orders with more decimal places than the product allows
+const BASE_SIZE_DECIMALS = {
+  "BTC-USD":  8,
+  "ETH-USD":  8,
+  "SOL-USD":  6,
+  "LINK-USD": 4,
+  "AKT-USD":  4,
+  "PEPE-USD": 0,   // integer PEPE only
+};
 
 // Per-symbol execution / regime config
 const SYMBOL_CONFIG = {
@@ -110,6 +127,123 @@ function fQty(n) {
   if (Math.abs(n) >= 1)    return n.toFixed(4);
   return n.toFixed(8);
 }
+
+// ── Coinbase Advanced Trade — authenticated requests ─────────────────────────
+// Used only when LIVE_TRADING=true. Paper mode never calls these functions.
+
+function buildJWT(method, path) {
+  const apiKey     = process.env.COINBASE_API_KEY ?? "";
+  const privateKey = (process.env.COINBASE_PRIVATE_KEY ?? "").replace(/\\n/g, "\n");
+  const now   = Math.floor(Date.now() / 1000);
+  const nonce = crypto.randomBytes(16).toString("hex");
+  const uri   = `${method} api.coinbase.com${path}`;
+  const header  = Buffer.from(JSON.stringify({ alg: "ES256", kid: apiKey, nonce })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify({ sub: apiKey, iss: "cdp", nbf: now, exp: now + 120, uri })).toString("base64url");
+  const sigInput  = `${header}.${payload}`;
+  const keyObject = crypto.createPrivateKey(privateKey);
+  const sig = crypto.sign("SHA256", Buffer.from(sigInput), { key: keyObject, dsaEncoding: "ieee-p1363" }).toString("base64url");
+  return `${sigInput}.${sig}`;
+}
+
+async function cbFetch(method, path, body = null) {
+  const opts = {
+    method,
+    headers: { "Authorization": `Bearer ${buildJWT(method, path)}`, "Content-Type": "application/json" },
+    signal: AbortSignal.timeout(15_000),
+  };
+  if (body) opts.body = JSON.stringify(body);
+  const res  = await fetch(`https://api.coinbase.com${path}`, opts);
+  const json = await res.json();
+  if (!res.ok) throw new Error(`CB ${res.status} ${method} ${path}: ${JSON.stringify(json).slice(0, 200)}`);
+  return json;
+}
+
+function formatBaseSize(symbol, qty) {
+  const dec = BASE_SIZE_DECIMALS[symbol] ?? 6;
+  if (dec === 0) return String(Math.floor(qty));
+  return qty.toFixed(dec);
+}
+
+async function placeLiveOrder(symbol, side, size) {
+  // BUY:  size = USD amount  → quote_size (market buy)
+  // SELL: size = crypto qty  → base_size  (market sell)
+  const clientOrderId = `craig-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+  const orderCfg = side === "BUY"
+    ? { market_market_ioc: { quote_size: size.toFixed(2) } }
+    : { market_market_ioc: { base_size:  formatBaseSize(symbol, size) } };
+
+  const result = await cbFetch("POST", "/api/v3/brokerage/orders", {
+    client_order_id:     clientOrderId,
+    product_id:          symbol,
+    side,
+    order_configuration: orderCfg,
+  });
+
+  if (!result.success) {
+    const errMsg = result.error_response?.message ?? result.failure_reason ?? JSON.stringify(result);
+    throw new Error(`Order rejected: ${errMsg}`);
+  }
+  return result.success_response?.order_id ?? result.order_id;
+}
+
+async function waitForFill(orderId, timeoutMs = 12_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const json = await cbFetch("GET", `/api/v3/brokerage/orders/historical/${orderId}`);
+    const o = json.order;
+    if (o?.status === "FILLED") return o;
+    if (o?.status === "CANCELLED" || o?.status === "FAILED") {
+      throw new Error(`Order ${orderId} ${o.status}: ${o.cancel_message ?? ""}`);
+    }
+    await new Promise(r => setTimeout(r, 750));
+  }
+  throw new Error(`Order ${orderId} fill timeout (${timeoutMs}ms)`);
+}
+
+async function fetchCoinbasePosition(symbol) {
+  const currency = symbol.replace("-USD", "");
+  const json     = await cbFetch("GET", "/api/v3/brokerage/accounts?limit=250");
+  const accounts = json.accounts ?? [];
+  const usdTotal  = accounts
+    .filter(a => a.currency === "USD" || a.currency === "USDC")
+    .reduce((s, a) => s + parseFloat(a.available_balance?.value ?? 0), 0);
+  const cryptoQty = parseFloat(
+    accounts.find(a => a.currency === currency)?.available_balance?.value ?? "0"
+  );
+  return { usdTotal, cryptoQty };
+}
+
+// executeBuy / executeSell — unified fill executor
+// Returns { price, qty, usd } — paper fills at bar.c, live fills at actual market price
+async function executeBuy(symbol, usdAmount, bar) {
+  if (!LIVE_TRADING) {
+    return { price: bar.c, qty: usdAmount / bar.c, usd: usdAmount };
+  }
+  const orderId = await placeLiveOrder(symbol, "BUY", usdAmount);
+  const order   = await waitForFill(orderId);
+  return {
+    price: parseFloat(order.average_filled_price),
+    qty:   parseFloat(order.filled_size),
+    usd:   parseFloat(order.filled_value),
+  };
+}
+
+async function executeSell(symbol, cryptoQty, bar) {
+  if (!LIVE_TRADING) {
+    return { price: bar.c, qty: cryptoQty, usd: cryptoQty * bar.c };
+  }
+  const orderId = await placeLiveOrder(symbol, "SELL", cryptoQty);
+  const order   = await waitForFill(orderId);
+  return {
+    price: parseFloat(order.average_filled_price),
+    qty:   parseFloat(order.filled_size),
+    usd:   parseFloat(order.filled_value),
+  };
+}
+
+// reconciledThisSession — tracks which symbols have had startup reconciliation
+// Reconciliation only runs once per process launch, not on every scan cycle
+const reconciledThisSession = new Set();
 
 // ── Candle fetch ──────────────────────────────────────────────────────────────
 async function fetchCandles(symbol, gran, secs, numBars) {
@@ -266,6 +400,28 @@ async function processSymbol(symbol) {
     return;
   }
 
+  // ── Live: reconcile crypto position on first scan after startup ──────────────
+  if (LIVE_TRADING && state.initialized && !reconciledThisSession.has(symbol)) {
+    reconciledThisSession.add(symbol);
+    try {
+      const pos = await fetchCoinbasePosition(symbol);
+      if (Math.abs(state.cryptoQty - pos.cryptoQty) > 1e-6) {
+        const msg = `⚠️ <b>${symbol}</b> position reconciled on startup\n` +
+          `State: ${fQty(state.cryptoQty)} → Actual: ${fQty(pos.cryptoQty)}\n` +
+          `Total USD on exchange: $${pos.usdTotal.toFixed(2)}`;
+        console.log(`[${symbol}] Reconcile: cryptoQty ${state.cryptoQty} → ${pos.cryptoQty}`);
+        state.cryptoQty = pos.cryptoQty;
+        saveState(symbol, state);
+        await sendTelegram(msg);
+      } else {
+        console.log(`[${symbol}] Reconcile OK: cryptoQty=${state.cryptoQty}  USD on exchange: $${pos.usdTotal.toFixed(2)}`);
+      }
+    } catch (e) {
+      console.error(`[${symbol}] Reconcile failed: ${e.message}`);
+      await sendTelegram(`⚠️ <b>${symbol}</b> startup reconcile failed: ${e.message}`);
+    }
+  }
+
   let candlesExec, candlesRegime;
   try {
     [candlesExec, candlesRegime] = await Promise.all([
@@ -310,6 +466,18 @@ async function processSymbol(symbol) {
       state.regime = "neutral";
     }
 
+    // Live: sync actual crypto balance at init time
+    if (LIVE_TRADING) {
+      try {
+        const pos = await fetchCoinbasePosition(symbol);
+        state.cryptoQty = pos.cryptoQty;
+        console.log(`[${symbol}] Live init: cryptoQty=${pos.cryptoQty}  totalUSD=$${pos.usdTotal.toFixed(2)}`);
+      } catch (e) {
+        console.error(`[${symbol}] Live init balance fetch failed: ${e.message}`);
+      }
+    }
+    reconciledThisSession.add(symbol);   // mark as reconciled — skip the startup check
+
     state.lastPrice         = lastBar.c;
     state.lastProcessedBarT = lastBar.t;
     state.initialized       = true;
@@ -320,8 +488,9 @@ async function processSymbol(symbol) {
     await sendTelegram(
       `🤖 <b>Craig Accum Bot — ${symbol}</b>\n` +
       `Initialized | Regime: ${state.regime.toUpperCase()}\n` +
-      `Cash: $${state.cash.toFixed(2)} | Crypto: ${state.cryptoQty.toFixed(6)}\n` +
-      `Exec: ${cfg.exec.label} | Regime TF: ${cfg.regime.label} EMA${EMA_FAST}/${EMA_SLOW}`
+      `Cash: $${state.cash.toFixed(2)} | Crypto: ${fQty(state.cryptoQty)}\n` +
+      `Exec: ${cfg.exec.label} | Regime TF: ${cfg.regime.label} EMA${EMA_FAST}/${EMA_SLOW}\n` +
+      (LIVE_TRADING ? `🔴 LIVE TRADING` : `📝 PAPER TRADING`)
     );
     return;
   }
@@ -421,17 +590,22 @@ async function processSymbol(symbol) {
       if (bearBOS && state.cash >= MIN_ORDER_USD) {
         const buyUSD = Math.min((state.regimeStartCapital * buySlot(state.bosCount)) / 100, state.cash);
         if (buyUSD >= MIN_ORDER_USD) {
-          const qty = buyUSD / bar.c;
-          state.cash      -= buyUSD;
-          state.cryptoQty += qty;
-          state.bosCount++;
-          const trade = { symbol, t: bar.t, type: "scaled_buy", bosNum: state.bosCount,
-                          price: bar.c, usd: buyUSD, qty, ts: new Date(bar.t).toISOString() };
-          state.trades.push(trade);
-          appendTrade(trade);
-          const msg = `🟢 <b>${symbol}</b> BUY #${state.bosCount} (bearish BOS)\n@ ${fP(bar.c)} | $${f2(buyUSD)} | ${fQ(qty)}\nCash: $${f2(state.cash)} | ${dateStr}`;
-          console.log(`[${symbol}] BUY #${state.bosCount} (BOS) @ ${fP(bar.c)} | $${f2(buyUSD)} | cash $${f2(state.cash)}`);
-          alerts.push(msg);
+          try {
+            const fill = await executeBuy(symbol, buyUSD, bar);
+            state.cash      -= fill.usd;
+            state.cryptoQty += fill.qty;
+            state.bosCount++;
+            const trade = { symbol, t: bar.t, type: "scaled_buy", bosNum: state.bosCount,
+                            price: fill.price, usd: fill.usd, qty: fill.qty, ts: new Date(bar.t).toISOString() };
+            state.trades.push(trade);
+            appendTrade(trade);
+            const msg = `🟢 <b>${symbol}</b> BUY #${state.bosCount} (bearish BOS)\n@ ${fP(fill.price)} | $${f2(fill.usd)} | ${fQ(fill.qty)}\nCash: $${f2(state.cash)} | ${dateStr}`;
+            console.log(`[${symbol}] BUY #${state.bosCount} (BOS) @ ${fP(fill.price)} | $${f2(fill.usd)} | cash $${f2(state.cash)}`);
+            alerts.push(msg);
+          } catch (e) {
+            console.error(`[${symbol}] BUY (BOS) order error: ${e.message}`);
+            await sendTelegram(`❌ <b>${symbol}</b> BUY (BOS) FAILED: ${e.message}`);
+          }
         }
       }
 
@@ -440,17 +614,22 @@ async function processSymbol(symbol) {
       if (CHOCH_CONTINUE_SCALE && bullCHOCH && chochBuyArmed && state.cash >= MIN_ORDER_USD) {
         const buyUSD = Math.min((state.regimeStartCapital * buySlot(state.bosCount)) / 100, state.cash);
         if (buyUSD >= MIN_ORDER_USD) {
-          const qty = buyUSD / bar.c;
-          state.cash      -= buyUSD;
-          state.cryptoQty += qty;
-          state.bosCount++;
-          const trade = { symbol, t: bar.t, type: "choch_buy", bosNum: state.bosCount,
-                          price: bar.c, usd: buyUSD, qty, ts: new Date(bar.t).toISOString() };
-          state.trades.push(trade);
-          appendTrade(trade);
-          const msg = `🟢✦ <b>${symbol}</b> BUY #${state.bosCount} (bullish CHOCH)\n@ ${fP(bar.c)} | $${f2(buyUSD)} | ${fQ(qty)}\nCash: $${f2(state.cash)} | ${dateStr}`;
-          console.log(`[${symbol}] BUY #${state.bosCount} (CHOCH) @ ${fP(bar.c)} | $${f2(buyUSD)}`);
-          alerts.push(msg);
+          try {
+            const fill = await executeBuy(symbol, buyUSD, bar);
+            state.cash      -= fill.usd;
+            state.cryptoQty += fill.qty;
+            state.bosCount++;
+            const trade = { symbol, t: bar.t, type: "choch_buy", bosNum: state.bosCount,
+                            price: fill.price, usd: fill.usd, qty: fill.qty, ts: new Date(bar.t).toISOString() };
+            state.trades.push(trade);
+            appendTrade(trade);
+            const msg = `🟢✦ <b>${symbol}</b> BUY #${state.bosCount} (bullish CHOCH)\n@ ${fP(fill.price)} | $${f2(fill.usd)} | ${fQ(fill.qty)}\nCash: $${f2(state.cash)} | ${dateStr}`;
+            console.log(`[${symbol}] BUY #${state.bosCount} (CHOCH) @ ${fP(fill.price)} | $${f2(fill.usd)}`);
+            alerts.push(msg);
+          } catch (e) {
+            console.error(`[${symbol}] BUY (CHOCH) order error: ${e.message}`);
+            await sendTelegram(`❌ <b>${symbol}</b> BUY (CHOCH) FAILED: ${e.message}`);
+          }
         }
       }
     }
@@ -462,17 +641,22 @@ async function processSymbol(symbol) {
       if (bullBOS && state.cryptoQty >= MIN_ORDER_QTY) {
         const sellQty = Math.min((state.regimeStartCryptoQty * sellSlot(state.bosCount)) / 100, state.cryptoQty);
         if (sellQty >= MIN_ORDER_QTY) {
-          const usd = sellQty * bar.c;
-          state.cash      += usd;
-          state.cryptoQty -= sellQty;
-          state.bosCount++;
-          const trade = { symbol, t: bar.t, type: "scaled_sell", bosNum: state.bosCount,
-                          price: bar.c, usd, qty: sellQty, ts: new Date(bar.t).toISOString() };
-          state.trades.push(trade);
-          appendTrade(trade);
-          const msg = `🔴 <b>${symbol}</b> SELL #${state.bosCount} (bullish BOS)\n@ ${fP(bar.c)} | $${f2(usd)} | ${fQ(sellQty)}\nCash: $${f2(state.cash)} | ${dateStr}`;
-          console.log(`[${symbol}] SELL #${state.bosCount} (BOS) @ ${fP(bar.c)} | $${f2(usd)} | cash $${f2(state.cash)}`);
-          alerts.push(msg);
+          try {
+            const fill = await executeSell(symbol, sellQty, bar);
+            state.cash      += fill.usd;
+            state.cryptoQty -= fill.qty;
+            state.bosCount++;
+            const trade = { symbol, t: bar.t, type: "scaled_sell", bosNum: state.bosCount,
+                            price: fill.price, usd: fill.usd, qty: fill.qty, ts: new Date(bar.t).toISOString() };
+            state.trades.push(trade);
+            appendTrade(trade);
+            const msg = `🔴 <b>${symbol}</b> SELL #${state.bosCount} (bullish BOS)\n@ ${fP(fill.price)} | $${f2(fill.usd)} | ${fQ(fill.qty)}\nCash: $${f2(state.cash)} | ${dateStr}`;
+            console.log(`[${symbol}] SELL #${state.bosCount} (BOS) @ ${fP(fill.price)} | $${f2(fill.usd)} | cash $${f2(state.cash)}`);
+            alerts.push(msg);
+          } catch (e) {
+            console.error(`[${symbol}] SELL (BOS) order error: ${e.message}`);
+            await sendTelegram(`❌ <b>${symbol}</b> SELL (BOS) FAILED: ${e.message}`);
+          }
         }
       }
 
@@ -481,17 +665,22 @@ async function processSymbol(symbol) {
       if (CHOCH_CONTINUE_SCALE && bearCHOCH && chochSellArmed && state.cryptoQty >= MIN_ORDER_QTY) {
         const sellQty = Math.min((state.regimeStartCryptoQty * sellSlot(state.bosCount)) / 100, state.cryptoQty);
         if (sellQty >= MIN_ORDER_QTY) {
-          const usd = sellQty * bar.c;
-          state.cash      += usd;
-          state.cryptoQty -= sellQty;
-          state.bosCount++;
-          const trade = { symbol, t: bar.t, type: "choch_sell", bosNum: state.bosCount,
-                          price: bar.c, usd, qty: sellQty, ts: new Date(bar.t).toISOString() };
-          state.trades.push(trade);
-          appendTrade(trade);
-          const msg = `🔴✦ <b>${symbol}</b> SELL #${state.bosCount} (bearish CHOCH)\n@ ${fP(bar.c)} | $${f2(usd)} | ${fQ(sellQty)}\nCash: $${f2(state.cash)} | ${dateStr}`;
-          console.log(`[${symbol}] SELL #${state.bosCount} (CHOCH) @ ${fP(bar.c)} | $${f2(usd)}`);
-          alerts.push(msg);
+          try {
+            const fill = await executeSell(symbol, sellQty, bar);
+            state.cash      += fill.usd;
+            state.cryptoQty -= fill.qty;
+            state.bosCount++;
+            const trade = { symbol, t: bar.t, type: "choch_sell", bosNum: state.bosCount,
+                            price: fill.price, usd: fill.usd, qty: fill.qty, ts: new Date(bar.t).toISOString() };
+            state.trades.push(trade);
+            appendTrade(trade);
+            const msg = `🔴✦ <b>${symbol}</b> SELL #${state.bosCount} (bearish CHOCH)\n@ ${fP(fill.price)} | $${f2(fill.usd)} | ${fQ(fill.qty)}\nCash: $${f2(state.cash)} | ${dateStr}`;
+            console.log(`[${symbol}] SELL #${state.bosCount} (CHOCH) @ ${fP(fill.price)} | $${f2(fill.usd)} | cash $${f2(state.cash)}`);
+            alerts.push(msg);
+          } catch (e) {
+            console.error(`[${symbol}] SELL (CHOCH) order error: ${e.message}`);
+            await sendTelegram(`❌ <b>${symbol}</b> SELL (CHOCH) FAILED: ${e.message}`);
+          }
         }
       }
     }
@@ -957,9 +1146,20 @@ async function main() {
   if (missingEnv.length) {
     console.warn(`⚠  Missing env vars: ${missingEnv.join(", ")} — Telegram alerts DISABLED`);
   }
+  if (LIVE_TRADING) {
+    const missingCB = ["COINBASE_API_KEY", "COINBASE_PRIVATE_KEY"].filter(k => !process.env[k]);
+    if (missingCB.length) {
+      console.error(`❌ LIVE_TRADING=true but missing: ${missingCB.join(", ")} — cannot start`);
+      process.exit(1);
+    }
+    console.log("🔴 LIVE_TRADING=true — real orders will be placed on Coinbase");
+  }
+
+  const modeLabel    = LIVE_TRADING ? "🔴 LIVE TRADING"  : "📝 PAPER TRADING";
+  const modeLabelTg  = LIVE_TRADING ? "🔴 <b>LIVE TRADING</b>" : "📝 PAPER TRADING";
 
   console.log("\n" + "═".repeat(66));
-  console.log("  Craig Accumulation Bot  v2  —  PAPER TRADING");
+  console.log(`  Craig Accumulation Bot  v2  —  ${modeLabel}`);
   console.log("═".repeat(66));
   for (const sym of SYMBOLS) {
     const c = SYMBOL_CONFIG[sym];
@@ -981,7 +1181,7 @@ async function main() {
     `Reports: every 6h + EOD at 23:55 UTC\n` +
     `Commands: /ping /price /status /report /trades /hist /scan\n` +
     `Per symbol: /btc /eth /sol /link /akt /pepe  |  /help for full list\n` +
-    `Capital: $${INITIAL_CAPITAL}/symbol  │  📝 PAPER TRADING`
+    `Capital: $${INITIAL_CAPITAL}/symbol  │  ${modeLabelTg}`
   );
 
   // Start Telegram command listener — auto-restarts on crash with a 30s delay
