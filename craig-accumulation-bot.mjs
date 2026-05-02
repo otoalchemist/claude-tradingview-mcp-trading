@@ -23,7 +23,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import "dotenv/config";
-import { readFileSync, writeFileSync, existsSync, appendFileSync } from "fs";
+import { readFileSync, writeFileSync, renameSync, existsSync, appendFileSync } from "fs";
 
 // ── Time constants ────────────────────────────────────────────────────────────
 const HOUR_MS        = 3_600_000;
@@ -44,6 +44,9 @@ const SCAN_INTERVAL_MS     = 5 * 60 * 1000;   // scan every 5 min
 const CB_MAX               = 350;
 const TRADES_LOG           = "craig-accum-trades.jsonl";
 const WARMUP               = SWING_LB * 2 + 2;
+const MAX_TRADES_IN_STATE  = 500;              // cap trades[] in state file to prevent unbounded growth
+const MIN_ORDER_USD        = 1.00;             // minimum buy size (raise to exchange minimum before live)
+const MIN_ORDER_QTY        = 1e-8;             // minimum sell qty (dust threshold)
 
 // Per-symbol execution / regime config
 const SYMBOL_CONFIG = {
@@ -74,11 +77,12 @@ const SYMBOL_CONFIG = {
 };
 
 // ── Telegram ──────────────────────────────────────────────────────────────────
-let tgOffset       = 0;       // tracks last processed update_id for getUpdates polling
-const BOT_START_MS = Date.now();
-let lastScanTime   = 0;       // epoch ms when last scan completed
-let lastScanMs     = 0;       // duration of last scan in ms
-let scanInProgress = false;   // prevents concurrent scan cycles
+let tgOffset           = 0;       // tracks last processed update_id for getUpdates polling
+const BOT_START_MS     = Date.now();
+let lastScanTime       = 0;       // epoch ms when last scan completed
+let lastScanMs         = 0;       // duration of last scan in ms
+let scanInProgress     = false;   // prevents concurrent scan cycles
+let lastFetchErrAlertMs = 0;      // throttle fetch-error Telegram alerts (max 1/hour)
 
 async function sendTelegram(msg) {
   const token  = process.env.TELEGRAM_BOT_TOKEN;
@@ -219,7 +223,10 @@ function loadState(symbol) {
     const state = JSON.parse(readFileSync(f, "utf8"));
     const cfg   = SYMBOL_CONFIG[symbol];
     if (state.execGran !== cfg.exec.gran) {
-      console.log(`[${symbol}] Exec TF changed (${state.execGran ?? "unknown"} → ${cfg.exec.gran}) — resetting state`);
+      // Back up the old state before wiping so it can be recovered if needed
+      const backupPath = stateFile(symbol) + `.backup-${Date.now()}`;
+      try { writeFileSync(backupPath, readFileSync(stateFile(symbol))); } catch {}
+      console.log(`[${symbol}] Exec TF changed (${state.execGran ?? "unknown"} → ${cfg.exec.gran}) — state reset (backup: ${backupPath})`);
       return makeFreshState(symbol);
     }
     // Back-fill new fields for states saved before they were added
@@ -233,7 +240,15 @@ function loadState(symbol) {
 }
 
 function saveState(symbol, state) {
-  writeFileSync(stateFile(symbol), JSON.stringify(state, null, 2));
+  // Trim trades array before saving to prevent unbounded file/memory growth
+  if (state.trades.length > MAX_TRADES_IN_STATE) {
+    state.trades = state.trades.slice(-MAX_TRADES_IN_STATE);
+  }
+  // Atomic write: write to .tmp then rename so a mid-write crash never corrupts the state file
+  const target = stateFile(symbol);
+  const tmp    = target + ".tmp";
+  writeFileSync(tmp, JSON.stringify(state, null, 2));
+  renameSync(tmp, target);
 }
 
 function appendTrade(entry) {
@@ -259,6 +274,11 @@ async function processSymbol(symbol) {
     ]);
   } catch (e) {
     console.error(`[${symbol}] Fetch error: ${e.message}`);
+    // Alert once per hour so a sustained outage doesn't spam Telegram
+    if (Date.now() - lastFetchErrAlertMs > 3_600_000) {
+      lastFetchErrAlertMs = Date.now();
+      await sendTelegram(`⚠️ <b>${symbol}</b> API fetch error: ${e.message}\nScans continuing — check Coinbase status.`);
+    }
     return;
   }
 
@@ -398,9 +418,9 @@ async function processSymbol(symbol) {
     if (state.regime === "buy") {
 
       // Scaled BOS buy — UNLIMITED: no slot cap; slots 5+ repeat at 27%
-      if (bearBOS && state.cash > 0.01) {
+      if (bearBOS && state.cash >= MIN_ORDER_USD) {
         const buyUSD = Math.min((state.regimeStartCapital * buySlot(state.bosCount)) / 100, state.cash);
-        if (buyUSD > 0.01) {
+        if (buyUSD >= MIN_ORDER_USD) {
           const qty = buyUSD / bar.c;
           state.cash      -= buyUSD;
           state.cryptoQty += qty;
@@ -417,9 +437,9 @@ async function processSymbol(symbol) {
 
       // CHOCH buy — continues scale; slots 5+ repeat at 27%
       const chochBuyArmed = !REQUIRE_BOS_BEFORE_CHOCH || state.bosCount >= 1;
-      if (CHOCH_CONTINUE_SCALE && bullCHOCH && chochBuyArmed && state.cash > 0.01) {
+      if (CHOCH_CONTINUE_SCALE && bullCHOCH && chochBuyArmed && state.cash >= MIN_ORDER_USD) {
         const buyUSD = Math.min((state.regimeStartCapital * buySlot(state.bosCount)) / 100, state.cash);
-        if (buyUSD > 0.01) {
+        if (buyUSD >= MIN_ORDER_USD) {
           const qty = buyUSD / bar.c;
           state.cash      -= buyUSD;
           state.cryptoQty += qty;
@@ -439,9 +459,9 @@ async function processSymbol(symbol) {
     if (state.regime === "sell") {
 
       // Scaled BOS sell — UNLIMITED: no slot cap; slots 5+ repeat at 27%
-      if (bullBOS && state.cryptoQty > 1e-10) {
+      if (bullBOS && state.cryptoQty >= MIN_ORDER_QTY) {
         const sellQty = Math.min((state.regimeStartCryptoQty * sellSlot(state.bosCount)) / 100, state.cryptoQty);
-        if (sellQty > 1e-10) {
+        if (sellQty >= MIN_ORDER_QTY) {
           const usd = sellQty * bar.c;
           state.cash      += usd;
           state.cryptoQty -= sellQty;
@@ -458,9 +478,9 @@ async function processSymbol(symbol) {
 
       // CHOCH sell — continues scale; slots 5+ repeat at 27%
       const chochSellArmed = !REQUIRE_BOS_BEFORE_CHOCH || state.bosCount >= 1;
-      if (CHOCH_CONTINUE_SCALE && bearCHOCH && chochSellArmed && state.cryptoQty > 1e-10) {
+      if (CHOCH_CONTINUE_SCALE && bearCHOCH && chochSellArmed && state.cryptoQty >= MIN_ORDER_QTY) {
         const sellQty = Math.min((state.regimeStartCryptoQty * sellSlot(state.bosCount)) / 100, state.cryptoQty);
-        if (sellQty > 1e-10) {
+        if (sellQty >= MIN_ORDER_QTY) {
           const usd = sellQty * bar.c;
           state.cash      += usd;
           state.cryptoQty -= sellQty;
@@ -932,6 +952,12 @@ async function runCycle() {
 }
 
 async function main() {
+  // ── Env validation ──────────────────────────────────────────────────────────
+  const missingEnv = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"].filter(k => !process.env[k]);
+  if (missingEnv.length) {
+    console.warn(`⚠  Missing env vars: ${missingEnv.join(", ")} — Telegram alerts DISABLED`);
+  }
+
   console.log("\n" + "═".repeat(66));
   console.log("  Craig Accumulation Bot  v2  —  PAPER TRADING");
   console.log("═".repeat(66));
@@ -958,8 +984,18 @@ async function main() {
     `Capital: $${INITIAL_CAPITAL}/symbol  │  📝 PAPER TRADING`
   );
 
-  // Start Telegram command listener (independent loop, never awaited)
-  startTelegramPoller().catch(e => console.error("[Telegram] Poller crashed:", e.message));
+  // Start Telegram command listener — auto-restarts on crash with a 30s delay
+  ;(async function telegramPollerLoop() {
+    while (true) {
+      try {
+        await startTelegramPoller();
+      } catch (e) {
+        console.error("[Telegram] Poller crashed:", e.message);
+        await sendTelegram(`⚠️ Telegram poller crashed: ${e.message}\nRestarting in 30s — /ping will resume shortly.`);
+        await new Promise(r => setTimeout(r, 30_000));
+      }
+    }
+  })();
 
   // Initial scan
   await runCycle();
@@ -972,7 +1008,9 @@ async function main() {
 
   setTimeout(async function loop() {
     await runCycle();
-    setTimeout(loop, SCAN_INTERVAL_MS);
+    // Re-align to next 5-min boundary after each cycle to prevent drift from slow scans
+    const drift = Date.now() % SCAN_INTERVAL_MS;
+    setTimeout(loop, drift > 0 ? SCAN_INTERVAL_MS - drift : SCAN_INTERVAL_MS);
   }, waitMs);
 }
 
