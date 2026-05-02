@@ -3,17 +3,17 @@ indicator("Craig Accum Bot — Signals", overlay=true, max_labels_count=500, max
 
 // ╔══════════════════════════════════════════════════════════════════════════════╗
 // ║  Mirrors craig-accumulation-bot.mjs exactly:                                ║
-// ║    • EMA 50/200 on Regime TF (death=BUY  golden=SELL)                       ║
+// ║    • EMA 50/200 on Regime TF (death cross=BUY  golden cross=SELL)           ║
 // ║    • Swing H/L via pivothigh/pivotlow  (lookback = 5)                       ║
 // ║    • BOS / CHOCH detection on Exec TF                                       ║
-// ║    • BUY  regime: bearBOS ➜ buy dip   │  bullCHOCH ➜ buy reversal          ║
-// ║    • SELL regime: bullBOS ➜ sell rally │  bearCHOCH ➜ sell reversal         ║
+// ║    • BUY  regime: bearBOS → buy the dip  │  bullCHOCH → buy reversal        ║
+// ║    • SELL regime: bullBOS → sell rally   │  bearCHOCH → sell reversal       ║
 // ║    • Scale slots [8,12,18,27]% counted per regime cycle                     ║
 // ║                                                                              ║
-// ║  Timeframe defaults  (change Regime TF to match your symbol):               ║
-// ║    BTC-USD   exec: 15m  regime: 60                                          ║
-// ║    ETH/SOL/LINK  exec: 5m   regime: 30                                      ║
-// ║    AKT/PEPE  exec: 1m   regime: 15                                          ║
+// ║  Timeframe guide  (set Regime TF to match your symbol):                     ║
+// ║    BTC-USD        exec: 15m   regime: 60                                    ║
+// ║    ETH/SOL/LINK   exec: 5m    regime: 30                                    ║
+// ║    AKT/PEPE       exec: 1m    regime: 15                                    ║
 // ╚══════════════════════════════════════════════════════════════════════════════╝
 
 // ─── INPUTS ───────────────────────────────────────────────────────────────────
@@ -22,7 +22,7 @@ i_regimeTF   = input.timeframe("30",  "Regime Timeframe",
 i_emaFast    = input.int(50,  "EMA Fast",       minval=1)
 i_emaSlow    = input.int(200, "EMA Slow",       minval=1)
 i_swingLB    = input.int(5,   "Swing Lookback", minval=1,
-    tooltip="Must match bot constant SWING_LB (default 5)")
+    tooltip="Must match bot SWING_LB (default 5). Swing dots are fixed at offset=-5 on chart.")
 i_reqBOS     = input.bool(true, "Require BOS before CHOCH",
     tooltip="Bot default: REQUIRE_BOS_BEFORE_CHOCH = true")
 
@@ -42,15 +42,15 @@ plot(i_showEMAs ? regEmaS : na, "EMA 200 (Regime TF)",
     color=color.new(color.blue,   0), linewidth=2)
 
 // ─── REGIME STATE ─────────────────────────────────────────────────────────────
-// Death cross  (EMA50 < EMA200) → BUY  regime (accumulate on dips)
-// Golden cross (EMA50 > EMA200) → SELL regime (distribute on rallies)
-goldenCross = ta.crossover( regEmaF, regEmaS)   // → SELL
-deathCross  = ta.crossunder(regEmaF, regEmaS)   // → BUY
+// Death cross  (EMA50 crosses BELOW EMA200) → BUY  regime  (accumulate on dips)
+// Golden cross (EMA50 crosses ABOVE EMA200) → SELL regime  (distribute on rallies)
+goldenCross = ta.crossover( regEmaF, regEmaS)
+deathCross  = ta.crossunder(regEmaF, regEmaS)
 
 var string regime = "neutral"
 if not na(regEmaF) and not na(regEmaS)
     if regime == "neutral"
-        // Initialise from current EMA state (same logic as bot init)
+        // Initialise from current EMA state — same as bot's first-run init logic
         regime := regEmaF > regEmaS ? "sell" : "buy"
     else if goldenCross
         regime := "sell"
@@ -62,39 +62,51 @@ bgcolor(i_showBG and regime == "buy"  ? color.new(color.green, 92) : na, title="
 bgcolor(i_showBG and regime == "sell" ? color.new(color.red,   92) : na, title="SELL Regime BG")
 
 // Cross markers
-plotshape(goldenCross, "⭐ Golden Cross → SELL", shape.labeldown, location.abovebar,
-    color=color.new(color.gold,   0), text="⭐ SELL", textcolor=color.black, size=size.small)
-plotshape(deathCross,  "☠ Death Cross → BUY",   shape.labelup,   location.belowbar,
-    color=color.new(color.purple, 0), text="☠ BUY",  textcolor=color.white, size=size.small)
+// FIX: color.gold is not a valid Pine v5 built-in — use color.rgb(255,215,0) for gold
+plotshape(goldenCross, "Golden Cross (SELL)", shape.labeldown, location.abovebar,
+    color=color.rgb(255, 215, 0), text="SELL", textcolor=color.black, size=size.small)
+plotshape(deathCross,  "Death Cross  (BUY)",  shape.labelup,   location.belowbar,
+    color=color.new(color.purple, 0), text="BUY", textcolor=color.white, size=size.small)
 
 // ─── SWING HIGHS / LOWS ───────────────────────────────────────────────────────
-// Detected with SWING_LB bars on each side — same as bot's isPH / isPL check
+// Confirmed with i_swingLB bars on each side — matches bot's isPH / isPL check
+// NOTE: plotshape `offset` requires const int — hardcoded to -5 (default swingLB).
+//       Change to match your Swing Lookback input if you use a custom value.
 pivotH = ta.pivothigh(high, i_swingLB, i_swingLB)
 pivotL = ta.pivotlow (low,  i_swingLB, i_swingLB)
 
-var float lastSH = na   // price of last confirmed swing high
-var float lastSL = na   // price of last confirmed swing low
+var float lastSH = na
+var float lastSL = na
 
 if not na(pivotH)
     lastSH := pivotH
 if not na(pivotL)
     lastSL := pivotL
 
+// FIX: offset must be const int — hardcoded to -5 (matches default Swing Lookback)
 plotshape(i_showSwings and not na(pivotH), "Swing High", shape.circle,
-    location.abovebar, color.new(color.red,  20), size=size.tiny, offset=-i_swingLB)
+    location.abovebar, color.new(color.red,  20), size=size.tiny, offset=-5)
 plotshape(i_showSwings and not na(pivotL), "Swing Low",  shape.circle,
-    location.belowbar, color.new(color.lime, 20), size=size.tiny, offset=-i_swingLB)
+    location.belowbar, color.new(color.lime, 20), size=size.tiny, offset=-5)
 
 // ─── BOS / CHOCH DETECTION ────────────────────────────────────────────────────
 // Mirrors bot logic exactly:
-//   close > lastSH  →  structure was -1 → bullCHOCH,  else bullBOS,  structure = 1
-//   close < lastSL  →  structure was  1 → bearCHOCH,  else bearBOS,  structure = -1
-var int structure = 0   // 1 = bullish  │  −1 = bearish  │  0 = neutral
+//   close > lastSH  and  was ≤ lastSH  →  structure -1 → bullCHOCH, else bullBOS → structure = 1
+//   close < lastSL  and  was ≥ lastSL  →  structure  1 → bearCHOCH, else bearBOS → structure = -1
 
-bullBOS   = false
-bearBOS   = false
-bullCHOCH = false
-bearCHOCH = false
+var int  structure = 0   // 1 = bullish  |  -1 = bearish  |  0 = neutral (persists across bars)
+
+// FIX: declare with `var` so `:=` reassignment is valid; reset to false each bar explicitly
+var bool bullBOS   = false
+var bool bearBOS   = false
+var bool bullCHOCH = false
+var bool bearCHOCH = false
+
+// Reset every bar before detection
+bullBOS   := false
+bearBOS   := false
+bullCHOCH := false
+bearCHOCH := false
 
 if not na(lastSH) and not na(lastSL)
     if close > lastSH and close[1] <= lastSH
@@ -111,59 +123,60 @@ if not na(lastSH) and not na(lastSL)
             bearBOS   := true
         structure := -1
 
-// BOS / CHOCH labels — placed at the level that was broken
+// BOS / CHOCH labels — placed at the price level that was broken
 if i_showBOSlbl
     if bullBOS
-        label.new(bar_index, lastSH, "BOS↑",
+        label.new(bar_index, lastSH, "BOS up",
             color=color.new(color.teal,   20), textcolor=color.white,
             style=label.style_label_up,   size=size.small)
     if bearBOS
-        label.new(bar_index, lastSL, "BOS↓",
+        label.new(bar_index, lastSL, "BOS dn",
             color=color.new(color.maroon, 20), textcolor=color.white,
             style=label.style_label_down, size=size.small)
     if bullCHOCH
-        label.new(bar_index, lastSH, "CHOCH↑",
+        label.new(bar_index, lastSH, "CHOCH up",
             color=color.new(color.green,  10), textcolor=color.white,
             style=label.style_label_up,   size=size.small)
     if bearCHOCH
-        label.new(bar_index, lastSL, "CHOCH↓",
+        label.new(bar_index, lastSL, "CHOCH dn",
             color=color.new(color.red,    10), textcolor=color.white,
             style=label.style_label_down, size=size.small)
 
 // ─── TRADE SIGNAL DETECTION ───────────────────────────────────────────────────
-// bosCount: resets on every regime change (same as bot state.bosCount = 0)
-// chochArmed: CHOCH only fires after at least 1 BOS has occurred (when i_reqBOS=true)
+// bosCount resets on every regime change — matches bot's state.bosCount = 0
+// chochArmed: CHOCH only fires after ≥1 BOS in current regime (when i_reqBOS=true)
 var int bosCount = 0
 if goldenCross or deathCross
     bosCount := 0
 
 chochArmed = not i_reqBOS or bosCount >= 1
 
-//  BUY  regime ──────────────────────────────────────────────
-//    bearBOS   → price breaks BELOW lastSL  →  buy the dip
-//    bullCHOCH → price breaks ABOVE lastSH  →  buy the reversal (if armed)
+// BUY  regime signals:
+//   bearBOS   = price breaks BELOW lastSL in BUY regime  → buy the dip
+//   bullCHOCH = price breaks ABOVE lastSH in BUY regime  → buy the reversal (armed)
 buyBOS    = regime == "buy" and bearBOS
 buyCHOCH  = regime == "buy" and bullCHOCH and chochArmed
 buySignal = buyBOS or buyCHOCH
 
-//  SELL regime ──────────────────────────────────────────────
-//    bullBOS   → price breaks ABOVE lastSH  →  sell the rally
-//    bearCHOCH → price breaks BELOW lastSL  →  sell the reversal (if armed)
+// SELL regime signals:
+//   bullBOS   = price breaks ABOVE lastSH in SELL regime → sell into strength
+//   bearCHOCH = price breaks BELOW lastSL in SELL regime → sell the reversal (armed)
 sellBOS    = regime == "sell" and bullBOS
 sellCHOCH  = regime == "sell" and bearCHOCH and chochArmed
 sellSignal = sellBOS or sellCHOCH
 
+// FIX: use explicit assignment instead of += for Pine v5 compatibility
 if buySignal or sellSignal
-    bosCount += 1
+    bosCount := bosCount + 1
 
 // ─── SIGNAL PLOTS ─────────────────────────────────────────────────────────────
-// Triangles (shows in legend + data window)
-plotshape(buySignal,  "BUY",  shape.triangleup,   location.belowbar,
+// Triangle shapes (appear in legend and data window)
+plotshape(buySignal,  "BUY Signal",  shape.triangleup,   location.belowbar,
     color=color.new(color.lime, 0), size=size.normal)
-plotshape(sellSignal, "SELL", shape.triangledown, location.abovebar,
+plotshape(sellSignal, "SELL Signal", shape.triangledown, location.abovebar,
     color=color.new(color.red,  0), size=size.normal)
 
-// Signal labels — slot # + trigger type
+// Signal labels — slot number + trigger type (BOS or CHOCH)
 if buySignal
     label.new(bar_index, na,
         "BUY #" + str.tostring(bosCount) + "  " + (buyBOS ? "BOS" : "CHOCH"),
@@ -189,7 +202,7 @@ if barstate.islast
 
     table.cell(tbl, 0, 0, "Regime",    text_color=color.silver, text_size=size.small,
         bgcolor=color.new(color.black, 50))
-    table.cell(tbl, 1, 0, str.upper(regime), text_color=rc, text_size=size.small,
+    table.cell(tbl, 1, 0, str.upper(regime), text_color=rc,     text_size=size.small,
         bgcolor=color.new(color.black, 50))
 
     table.cell(tbl, 0, 1, "Exec TF",   text_color=color.silver, text_size=size.small)
