@@ -10,14 +10,14 @@ indicator("Craig Accum Bot - Signals", overlay=true, max_labels_count=500, max_l
 //   SELL regime: bullBOS = sell rally    | bearCHOCH = sell reversal
 //
 //   Timeframe guide (set Regime TF input to match your symbol):
-//     BTC-USD      exec: 15m  regime: 60
-//     ETH/SOL/LINK exec: 5m   regime: 30
-//     AKT/PEPE     exec: 1m   regime: 15
+//     BTC-USD               exec: 15m  regime: 60
+//     ETH/SOL/LINK/AKT      exec: 5m   regime: 30
+//     PEPE                  exec: 1m   regime: 15
 // =============================================================================
 
 // --- INPUTS ------------------------------------------------------------------
 // Regime TF: BTC=60, ETH/SOL/LINK=30, AKT/PEPE=15
-i_regimeTF   = input.timeframe("30", "Regime TF  (BTC=60 | ETH/SOL/LINK=30 | AKT/PEPE=15)")
+i_regimeTF   = input.timeframe("30", "Regime TF  (BTC=60 | ETH/SOL/LINK/AKT=30 | PEPE=15)")
 i_emaFast    = input.int(50,  "EMA Fast", minval=1)
 i_emaSlow    = input.int(200, "EMA Slow", minval=1)
 i_swingLB    = input.int(5,   "Swing Lookback (offset hardcoded -5)", minval=1)
