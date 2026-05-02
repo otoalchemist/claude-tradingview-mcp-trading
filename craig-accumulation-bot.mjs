@@ -7,12 +7,13 @@
 //   ETH-USD  : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
 //   SOL-USD  : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
 //   LINK-USD : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
-//   AKT-USD  : 15m EMA50/200 regime  →   1m BOS/CHOCH execution
+//   AKT-USD  : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
 //   PEPE-USD : 15m EMA50/200 regime  →   1m BOS/CHOCH execution
 //
 //   Death cross  → BUY  regime: scale-in  on each bearish BOS / bullish CHOCH
 //   Golden cross → SELL regime: scale-out on each bullish BOS / bearish CHOCH
-//   Scale ladder : [8, 12, 18, 27]% of regime-start capital — UNLIMITED slots
+//   Buy  ladder  : [8, 12, 18, 27]% of regime-start capital — UNLIMITED slots
+//   Sell ladder  : [15, 18, 27, 27]% of regime-start crypto  — UNLIMITED slots
 //   CHOCH        : continues scale (same per-slot %; no all-in)
 //
 // REPORTS  : 6-hour check-in (00, 06, 12, 18 UTC) + EOD at 23:55 UTC via Telegram
@@ -35,7 +36,8 @@ const INITIAL_CAPITAL      = 500;
 const EMA_FAST             = 50;
 const EMA_SLOW             = 200;
 const SWING_LB             = 5;
-const BOS_SCALE_PCT        = [8, 12, 18, 27];
+const BOS_SCALE_PCT_BUY    = [8, 12, 18, 27];   // scale-in: conservative entry
+const BOS_SCALE_PCT_SELL   = [15, 18, 27, 27];  // scale-out: larger first exit
 const REQUIRE_BOS_BEFORE_CHOCH = true;
 const CHOCH_CONTINUE_SCALE     = true;
 const SCAN_INTERVAL_MS     = 5 * 60 * 1000;   // scan every 5 min
@@ -62,8 +64,8 @@ const SYMBOL_CONFIG = {
     regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 250, ms: THIRTY_MIN_MS,  label: "30m" },
   },
   "AKT-USD": {
-    exec:  { gran: "ONE_MINUTE",     secs:   60, bars: 300, label: "1m"  },
-    regime:{ gran: "FIFTEEN_MINUTE", secs:  900, bars: 250, ms: FIFTEEN_MIN_MS, label: "15m" },
+    exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
+    regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 250, ms: THIRTY_MIN_MS,  label: "30m" },
   },
   "PEPE-USD": {
     exec:  { gran: "ONE_MINUTE",     secs:   60, bars: 300, label: "1m"  },
@@ -388,15 +390,16 @@ async function processSymbol(symbol) {
     // ── 4. Trade execution ───────────────────────────────────────────────────
     const dateStr = new Date(bar.t).toISOString().slice(0, 16).replace("T", " ");
 
-    // Allocation % — clamps to last slot (27%) for all signals beyond the initial 4
-    const slotPct = idx => BOS_SCALE_PCT[Math.min(idx, BOS_SCALE_PCT.length - 1)];
+    // Allocation % — buy uses conservative ladder; sell uses aggressive first-slot ladder
+    const buySlot  = idx => BOS_SCALE_PCT_BUY [Math.min(idx, BOS_SCALE_PCT_BUY.length  - 1)];
+    const sellSlot = idx => BOS_SCALE_PCT_SELL[Math.min(idx, BOS_SCALE_PCT_SELL.length - 1)];
 
     // ── BUY regime ────────────────────────────────────────────────────────────
     if (state.regime === "buy") {
 
       // Scaled BOS buy — UNLIMITED: no slot cap; slots 5+ repeat at 27%
       if (bearBOS && state.cash > 0.01) {
-        const buyUSD = Math.min((state.regimeStartCapital * slotPct(state.bosCount)) / 100, state.cash);
+        const buyUSD = Math.min((state.regimeStartCapital * buySlot(state.bosCount)) / 100, state.cash);
         if (buyUSD > 0.01) {
           const qty = buyUSD / bar.c;
           state.cash      -= buyUSD;
@@ -415,7 +418,7 @@ async function processSymbol(symbol) {
       // CHOCH buy — continues scale; slots 5+ repeat at 27%
       const chochBuyArmed = !REQUIRE_BOS_BEFORE_CHOCH || state.bosCount >= 1;
       if (CHOCH_CONTINUE_SCALE && bullCHOCH && chochBuyArmed && state.cash > 0.01) {
-        const buyUSD = Math.min((state.regimeStartCapital * slotPct(state.bosCount)) / 100, state.cash);
+        const buyUSD = Math.min((state.regimeStartCapital * buySlot(state.bosCount)) / 100, state.cash);
         if (buyUSD > 0.01) {
           const qty = buyUSD / bar.c;
           state.cash      -= buyUSD;
@@ -437,7 +440,7 @@ async function processSymbol(symbol) {
 
       // Scaled BOS sell — UNLIMITED: no slot cap; slots 5+ repeat at 27%
       if (bullBOS && state.cryptoQty > 1e-10) {
-        const sellQty = Math.min((state.regimeStartCryptoQty * slotPct(state.bosCount)) / 100, state.cryptoQty);
+        const sellQty = Math.min((state.regimeStartCryptoQty * sellSlot(state.bosCount)) / 100, state.cryptoQty);
         if (sellQty > 1e-10) {
           const usd = sellQty * bar.c;
           state.cash      += usd;
@@ -456,7 +459,7 @@ async function processSymbol(symbol) {
       // CHOCH sell — continues scale; slots 5+ repeat at 27%
       const chochSellArmed = !REQUIRE_BOS_BEFORE_CHOCH || state.bosCount >= 1;
       if (CHOCH_CONTINUE_SCALE && bearCHOCH && chochSellArmed && state.cryptoQty > 1e-10) {
-        const sellQty = Math.min((state.regimeStartCryptoQty * slotPct(state.bosCount)) / 100, state.cryptoQty);
+        const sellQty = Math.min((state.regimeStartCryptoQty * sellSlot(state.bosCount)) / 100, state.cryptoQty);
         if (sellQty > 1e-10) {
           const usd = sellQty * bar.c;
           state.cash      += usd;
@@ -674,7 +677,8 @@ async function sendPing() {
     `Next scan : ~${nextStr}\n` +
     `Symbols   : ${SYMBOLS.length}  [${SYMBOLS.map(s => s.replace("-USD","")).join(" · ")}]\n` +
     `Capital   : $${INITIAL_CAPITAL}/sym  ($${SYMBOLS.length * INITIAL_CAPITAL} total)\n` +
-    `Scale     : [${BOS_SCALE_PCT.join(", ")}]%  UNLIMITED slots`
+    `Buy scale : [${BOS_SCALE_PCT_BUY.join(", ")}]%  UNLIMITED\n` +
+    `Sell scale: [${BOS_SCALE_PCT_SELL.join(", ")}]%  UNLIMITED`
   );
 }
 
@@ -767,18 +771,23 @@ async function sendHelpMessage() {
   await sendTelegram(
     `🤖 <b>Craig Accum Bot v2 — Commands</b>\n\n` +
     `<b>Status &amp; Prices</b>\n` +
-    `/ping  /p   — Health: uptime, last scan, next scan\n` +
-    `/price /px  — Live prices + regime for all symbols\n` +
-    `/status /s  — Regime overview + P&amp;L table\n` +
-    `/report /r  — Full detailed report (all symbols)\n\n` +
+    `/ping   — Health: uptime, last scan, next scan\n` +
+    `/price  — Live prices + regime for all symbols\n` +
+    `/status — Regime overview + P&amp;L per symbol\n` +
+    `/report — Full portfolio report (all symbols)\n\n` +
     `<b>Trades</b>\n` +
-    `/trades /t  — Today's trades by symbol\n` +
-    `/hist       — Last 20 trades across all symbols\n\n` +
+    `/trades — Today's trades by symbol\n` +
+    `/hist   — Last 20 trades across all symbols\n\n` +
     `<b>Per Symbol</b>\n` +
-    `/btc  /eth  /sol  /link  /akt  /pepe  — Symbol snapshot\n\n` +
+    `/btc /eth /sol /link /akt /pepe — Symbol snapshot\n\n` +
     `<b>Control</b>\n` +
-    `/scan /sc   — Trigger immediate scan now\n` +
-    `/help /h    — This message\n\n` +
+    `/scan   — Trigger immediate scan now\n` +
+    `/help   — This message\n\n` +
+    `<b>Strategy</b>\n` +
+    `BTC: 1h regime / 15m exec\n` +
+    `ETH · SOL · LINK · AKT: 30m regime / 5m exec\n` +
+    `PEPE: 15m regime / 1m exec\n` +
+    `Buy: [${BOS_SCALE_PCT_BUY.join(", ")}]%  |  Sell: [${BOS_SCALE_PCT_SELL.join(", ")}]%  UNLIMITED\n\n` +
     `⏰ Auto-reports: 00/06/12/18 UTC  +  EOD 23:55 UTC`
   );
 }
@@ -832,7 +841,6 @@ async function startTelegramPoller() {
         else if (text === "/price"   || text === "/px") { await sendPrices(); }
         else if (text === "/status"  || text === "/s")  { await sendRegimeOverview(); }
         else if (text === "/report"  || text === "/r")  { await sendPortfolioReport(false); }
-        else if (text === "/regime"  || text === "/rg") { await sendRegimeOverview(); }
         else if (text === "/trades"  || text === "/t")  { await sendTodaysTrades(); }
         else if (text === "/hist"    || text === "/history") { await sendTradeHistory(); }
         else if (text === "/scan"    || text === "/sc") {
@@ -931,7 +939,7 @@ async function main() {
     const c = SYMBOL_CONFIG[sym];
     console.log(`  ${sym.padEnd(9)}  exec: ${c.exec.label.padEnd(4)}  regime: ${c.regime.label.padEnd(4)}  EMA${EMA_FAST}/${EMA_SLOW}`);
   }
-  console.log(`  Scale   : [${BOS_SCALE_PCT.join(", ")}]%  │  UNLIMITED slots (5+ repeat at ${BOS_SCALE_PCT.at(-1)}%)`);
+  console.log(`  Buy     : [${BOS_SCALE_PCT_BUY.join(", ")}]%  │  Sell: [${BOS_SCALE_PCT_SELL.join(", ")}]%  │  UNLIMITED slots`);
   console.log(`  Reports : 6h check-in (00/06/12/18 UTC)  +  EOD at 23:55 UTC`);
   console.log(`  Commands: /ping /price /status /report /trades /hist /scan /btc /eth /sol /link /akt /pepe /help`);
   console.log(`  Capital : $${INITIAL_CAPITAL}/symbol  │  Scan: every 5 min`);
@@ -940,15 +948,13 @@ async function main() {
   await sendTelegram(
     `🤖 <b>Craig Accumulation Bot v2 — STARTED</b>\n` +
     `BTC:  1h  regime / 15m exec\n` +
-    `ETH:  30m regime /  5m exec\n` +
-    `SOL:  30m regime /  5m exec\n` +
-    `LINK: 30m regime /  5m exec\n` +
-    `AKT:  15m regime /  1m exec\n` +
-    `PEPE: 15m regime /  1m exec\n` +
-    `Scale: [${BOS_SCALE_PCT.join(", ")}]%  │  UNLIMITED slots (5+ @ ${BOS_SCALE_PCT.at(-1)}%)\n` +
+    `ETH · SOL · LINK · AKT:  30m regime / 5m exec\n` +
+    `PEPE: 15m regime / 1m exec\n` +
+    `Buy:  [${BOS_SCALE_PCT_BUY.join(", ")}]%  UNLIMITED\n` +
+    `Sell: [${BOS_SCALE_PCT_SELL.join(", ")}]%  UNLIMITED\n` +
     `Reports: every 6h + EOD at 23:55 UTC\n` +
     `Commands: /ping /price /status /report /trades /hist /scan\n` +
-    `Per symbol: /btc /eth /sol /link /akt /pepe  │  /help for full list\n` +
+    `Per symbol: /btc /eth /sol /link /akt /pepe  |  /help for full list\n` +
     `Capital: $${INITIAL_CAPITAL}/symbol  │  📝 PAPER TRADING`
   );
 
