@@ -4,7 +4,7 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "node bot.js",
+    "startCommand": "node craig-accumulation-bot.mjs",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 3
   }

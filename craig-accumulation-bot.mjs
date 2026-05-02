@@ -114,6 +114,39 @@ async function sendTelegram(msg) {
   } catch (e) { console.error("Telegram error:", e.message); }
 }
 
+// ── Register commands with BotFather so the / menu shows Craig bot commands only.
+// Overwrites any stale E2 Swing Ensemble commands from the old bot.js deployment.
+async function registerBotCommands() {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) return;
+  const commands = [
+    { command: "ping",   description: "Health check — uptime, last scan, next scan" },
+    { command: "price",  description: "Live prices + regime for all symbols" },
+    { command: "status", description: "Regime overview + P&L per symbol" },
+    { command: "report", description: "Full portfolio report (all symbols)" },
+    { command: "trades", description: "Today's trades by symbol" },
+    { command: "hist",   description: "Last 20 trades across all symbols" },
+    { command: "scan",   description: "Trigger an immediate scan now" },
+    { command: "btc",    description: "BTC-USD snapshot" },
+    { command: "eth",    description: "ETH-USD snapshot" },
+    { command: "sol",    description: "SOL-USD snapshot" },
+    { command: "link",   description: "LINK-USD snapshot" },
+    { command: "akt",    description: "AKT-USD snapshot" },
+    { command: "pepe",   description: "PEPE-USD snapshot" },
+    { command: "help",   description: "Full command list + strategy info" },
+  ];
+  try {
+    await fetch(`https://api.telegram.org/bot${token}/setMyCommands`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ commands }),
+    });
+    console.log("[Telegram] Bot commands registered with BotFather");
+  } catch (e) {
+    console.error("[Telegram] Failed to register commands:", e.message);
+  }
+}
+
 // ── Adaptive price / qty formatters (handles PEPE micro-prices) ───────────────
 function fPrice(n) {
   if (!n || n === 0)        return "$0";
@@ -1080,7 +1113,7 @@ async function startTelegramPoller() {
 function printStatus() {
   const sep = "─".repeat(76);
   console.log(`\n${sep}`);
-  console.log(`  ${new Date().toISOString().slice(0, 19)} UTC  │  Craig Accum Bot v2  │  Paper Trading`);
+  console.log(`  ${new Date().toISOString().slice(0, 19)} UTC  │  Craig Accum Bot v2  │  ${LIVE_TRADING ? "LIVE TRADING" : "Paper Trading"}`);
   console.log(sep);
   console.log(`  ${"Symbol".padEnd(10)} ${"Regime".padEnd(8)} ${"Cash".padStart(10)} ${"Crypto".padStart(14)} ${"Sigs".padStart(6)} ${"Trades".padStart(8)}  Regimes`);
   console.log(`  ${"-".repeat(70)}`);
@@ -1157,6 +1190,9 @@ async function main() {
 
   const modeLabel    = LIVE_TRADING ? "🔴 LIVE TRADING"  : "📝 PAPER TRADING";
   const modeLabelTg  = LIVE_TRADING ? "🔴 <b>LIVE TRADING</b>" : "📝 PAPER TRADING";
+
+  // Overwrite stale BotFather command menu (old E2 bot registered E2-specific commands)
+  await registerBotCommands();
 
   console.log("\n" + "═".repeat(66));
   console.log(`  Craig Accumulation Bot  v2  —  ${modeLabel}`);
