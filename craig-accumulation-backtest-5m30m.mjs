@@ -25,14 +25,15 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ── Config ────────────────────────────────────────────────────────────────────
-const SYMBOLS         = ["BTC-USD", "ETH-USD", "SOL-USD"];
+const SYMBOLS         = ["ETH-USD", "SOL-USD", "LINK-USD", "AKT-USD"];  // 5m exec / 30m regime
 const INITIAL_CAPITAL = 500;
 
 const EMA_FAST  = 50;   // on 30m candles → 50 × 30m = 25h lookback
 const EMA_SLOW  = 200;  // on 30m candles → 200 × 30m = 100h lookback
 const SWING_LB  = 5;    // 5m pivot: 5 bars each side → 25 min confirmation
 
-const BOS_SCALE_PCT            = [8, 12, 18, 27];
+const BOS_SCALE_PCT_BUY        = [8, 12, 18, 27];   // buy scale-in
+const BOS_SCALE_PCT_SELL       = [15, 18, 27, 27];  // sell scale-out (larger first exit)
 const REQUIRE_BOS_BEFORE_CHOCH = true;
 const CHOCH_CONTINUE_SCALE     = true;  // CHOCH uses next scale slot, not all-in
 
@@ -242,12 +243,13 @@ function simulate(candles5m, candles30m, unlimitedSlots = false) {
     }
 
     // ── 5. Execute trades ─────────────────────────────────────────────────────
-    // Helper: pick allocation pct — clamps to last slot when bosCount overflows
-    const allocPct = idx => BOS_SCALE_PCT[Math.min(idx, BOS_SCALE_PCT.length - 1)];
+    // Helper: pick allocation pct — uses regime-appropriate ladder, clamps to last slot on overflow
+    const ladder   = regime === "sell" ? BOS_SCALE_PCT_SELL : BOS_SCALE_PCT_BUY;
+    const allocPct = idx => ladder[Math.min(idx, ladder.length - 1)];
     // Whether a BOS/CHOCH slot is available to trade
     const slotOpen = unlimitedSlots
       ? () => true
-      : () => bosCount < BOS_SCALE_PCT.length;
+      : () => bosCount < ladder.length;
 
     if (regime === "buy") {
       // BOS scaled buy
@@ -265,7 +267,7 @@ function simulate(candles5m, candles30m, unlimitedSlots = false) {
       const chochArmed = !REQUIRE_BOS_BEFORE_CHOCH || bosCount >= 1;
       if (bullCHOCH && chochArmed && cash > 0.01) {
         let buyUSD;
-        if (unlimitedSlots || bosCount < BOS_SCALE_PCT.length) {
+        if (unlimitedSlots || bosCount < ladder.length) {
           buyUSD = Math.min((regimeStartCapital * allocPct(bosCount)) / 100, cash);
         } else {
           buyUSD = cash; // limited overflow: deploy all remaining
@@ -296,7 +298,7 @@ function simulate(candles5m, candles30m, unlimitedSlots = false) {
       const chochArmed = !REQUIRE_BOS_BEFORE_CHOCH || bosCount >= 1;
       if (bearCHOCH && chochArmed && cryptoQty > 1e-8) {
         let sellQty;
-        if (unlimitedSlots || bosCount < BOS_SCALE_PCT.length) {
+        if (unlimitedSlots || bosCount < ladder.length) {
           sellQty = Math.min((regimeStartCryptoQty * allocPct(bosCount)) / 100, cryptoQty);
         } else {
           sellQty = cryptoQty; // limited overflow: sell all remaining
@@ -423,8 +425,8 @@ async function main() {
   console.log(`  Symbols   : ${SYMBOLS.join(", ")}`);
   console.log(`  Regime    : EMA${EMA_FAST}/EMA${EMA_SLOW} on 30m (${EMA_FAST * 0.5}h / ${EMA_SLOW * 0.5}h lookback)`);
   console.log(`  Execution : 5m BOS/CHOCH  (swing ${SWING_LB} bars = ${SWING_LB * 5} min confirmation)`);
-  console.log(`  LIMITED   : max ${BOS_SCALE_PCT.length} slots  [${BOS_SCALE_PCT.join(", ")}]%`);
-  console.log(`  UNLIMITED : no slot cap — slots 5+ repeat at ${BOS_SCALE_PCT.at(-1)}% until capital exhausted`);
+  console.log(`  LIMITED   : max 4 slots — BUY [${BOS_SCALE_PCT_BUY.join(", ")}]%  SELL [${BOS_SCALE_PCT_SELL.join(", ")}]%`);
+  console.log(`  UNLIMITED : no slot cap — slots 5+ repeat at last ladder % until capital exhausted`);
   console.log(`  Capital   : $${INITIAL_CAPITAL} per symbol`);
   console.log(`  NOTE: 5m data availability limits backtest to ~30–60 days.\n`);
 
