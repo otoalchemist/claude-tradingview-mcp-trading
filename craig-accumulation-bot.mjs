@@ -729,8 +729,31 @@ async function processSymbol(symbol) {
 }
 
 // ── Periodic reporting ────────────────────────────────────────────────────────
-let lastSixHourSummaryHour = -1;   // UTC hour (0/6/12/18) of last 6h summary sent
-let lastEodSentDate        = "";   // "YYYY-MM-DD" of last EOD report sent
+// Report state persisted to disk so a bot restart within a 6h window
+// does not fire a duplicate report on the very next scan.
+const REPORT_STATE_FILE = "craig-accum-report-state.json";
+
+function loadReportState() {
+  try {
+    if (existsSync(REPORT_STATE_FILE)) {
+      const s = JSON.parse(readFileSync(REPORT_STATE_FILE, "utf8"));
+      return { lastSixHourSummaryHour: s.lastSixHourSummaryHour ?? -1,
+               lastEodSentDate:        s.lastEodSentDate        ?? "" };
+    }
+  } catch {}
+  return { lastSixHourSummaryHour: -1, lastEodSentDate: "" };
+}
+
+function saveReportState() {
+  try {
+    writeFileSync(REPORT_STATE_FILE,
+      JSON.stringify({ lastSixHourSummaryHour, lastEodSentDate }, null, 2));
+  } catch (e) { console.error("[Report] Failed to save report state:", e.message); }
+}
+
+const _rs = loadReportState();
+let lastSixHourSummaryHour = _rs.lastSixHourSummaryHour;
+let lastEodSentDate        = _rs.lastEodSentDate;
 
 function buildSymbolReport(symbol) {
   let s;
@@ -850,16 +873,19 @@ async function checkAndSendReports() {
   const dateStr   = now.toISOString().slice(0, 10);
 
   // 6-hour check-ins at 00:00, 06:00, 12:00, 18:00 UTC
-  // Fire on the first scan within 10 minutes of each boundary
+  // Fire on the first scheduled scan within 10 minutes of each boundary.
+  // lastSixHourSummaryHour persists to disk — safe across restarts.
   if (hourUTC % 6 === 0 && minuteUTC < 10 && lastSixHourSummaryHour !== hourUTC) {
     await sendPortfolioReport(false);
     lastSixHourSummaryHour = hourUTC;
+    saveReportState();
   }
 
   // End-of-day report at 23:55 UTC
   if (hourUTC === 23 && minuteUTC >= 55 && lastEodSentDate !== dateStr) {
     await sendPortfolioReport(true);
     lastEodSentDate = dateStr;
+    saveReportState();
   }
 }
 
@@ -1090,7 +1116,7 @@ async function startTelegramPoller() {
             await sendTelegram("⏳ Scan already in progress — please wait.");
           } else {
             await sendTelegram("🔄 Manual scan triggered...");
-            runCycle().catch(e => sendTelegram(`❌ Scan error: ${e.message}`));
+            runCycle(true).catch(e => sendTelegram(`❌ Scan error: ${e.message}`));
           }
         } else if (SHORTCUTS[text]) {
           await sendTelegram(buildSymbolReport(SHORTCUTS[text]));
@@ -1141,14 +1167,17 @@ function printStatus() {
 }
 
 // ── Main loop ─────────────────────────────────────────────────────────────────
-async function runCycle() {
+// manual=true: triggered by /scan command — skips auto-report check so a
+// manual scan near a 6h boundary never fires the scheduled 6h report.
+async function runCycle(manual = false) {
   if (scanInProgress) {
     console.log("⚠  Scan already in progress — skipping duplicate cycle");
     return;
   }
   scanInProgress = true;
   const start = Date.now();
-  console.log(`\n⏱  Scanning ${SYMBOLS.length} symbols @ ${new Date().toISOString().slice(0, 19)} UTC`);
+  const label = manual ? "manual" : "scheduled";
+  console.log(`\n⏱  Scanning ${SYMBOLS.length} symbols @ ${new Date().toISOString().slice(0, 19)} UTC  [${label}]`);
 
   try {
     for (const symbol of SYMBOLS) {
@@ -1166,8 +1195,8 @@ async function runCycle() {
     printStatus();
     console.log(`  Cycle done in ${(lastScanMs / 1000).toFixed(1)}s — next scan in 5 min`);
 
-    // Send 6h / EOD reports if scheduled
-    await checkAndSendReports();
+    // Send 6h / EOD reports only on scheduled scans — not manual /scan triggers
+    if (!manual) await checkAndSendReports();
   } finally {
     scanInProgress = false;
   }
