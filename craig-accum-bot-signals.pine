@@ -10,14 +10,14 @@ indicator("Craig Accum Bot - Signals", overlay=true, max_labels_count=500, max_l
 //   SELL regime: bullBOS = sell rally    | bearCHOCH = sell reversal
 //
 //   Timeframe guide (set Regime TF input to match your symbol):
-//     BTC-USD               exec: 15m  regime: 60
-//     ETH/SOL/LINK/AKT      exec: 5m   regime: 30
-//     PEPE                  exec: 1m   regime: 15
+//     BTC-USD          exec: 15m  regime: 60
+//     ETH/SOL/LINK     exec: 5m   regime: 30
+//     PEPE             exec: 1m   regime: 15
 // =============================================================================
 
 // --- INPUTS ------------------------------------------------------------------
-// Regime TF: BTC=60, ETH/SOL/LINK=30, AKT/PEPE=15
-i_regimeTF   = input.timeframe("30", "Regime TF  (BTC=60 | ETH/SOL/LINK/AKT=30 | PEPE=15)")
+// Regime TF: BTC=60, ETH/SOL/LINK=30, PEPE=15
+i_regimeTF   = input.timeframe("30", "Regime TF  (BTC=60 | ETH/SOL/LINK=30 | PEPE=15)")
 i_emaFast    = input.int(50,  "EMA Fast", minval=1)
 i_emaSlow    = input.int(200, "EMA Slow", minval=1)
 i_swingLB    = input.int(5,   "Swing Lookback (offset hardcoded -5)", minval=1)
@@ -145,7 +145,7 @@ if sellSignal
     label.new(bar_index, na, "SELL #" + str.tostring(bosCount) + "  " + (sellBOS ? "BOS" : "CHOCH"), yloc=yloc.abovebar, color=color.red, textcolor=color.white, style=label.style_label_down, size=size.small)
 
 // --- INFO TABLE --------------------------------------------------------------
-var table tbl = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 75), border_width=1, border_color=color.new(color.gray, 60))
+var table tbl = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 75), border_width=1, border_color=color.new(color.gray, 60))
 
 if barstate.islast
     rc = regime == "buy" ? color.lime : regime == "sell" ? color.red : color.gray
@@ -162,3 +162,7 @@ if barstate.islast
     table.cell(tbl, 1, 4, str.tostring(regEmaS, "#.####"),  text_color=color.new(color.blue, 0), text_size=size.small)
     table.cell(tbl, 0, 5, "Signals",   text_color=color.silver, text_size=size.small)
     table.cell(tbl, 1, 5, str.tostring(bosCount), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 0, 6, "Buy %",     text_color=color.silver, text_size=size.small)
+    table.cell(tbl, 1, 6, "8·12·18·27", text_color=color.new(color.lime, 20), text_size=size.small)
+    table.cell(tbl, 0, 7, "Sell %",    text_color=color.silver, text_size=size.small)
+    table.cell(tbl, 1, 7, "15·18·27·27", text_color=color.new(color.red, 20), text_size=size.small)
