@@ -139,10 +139,36 @@ let lastScanMs         = 0;       // duration of last scan in ms
 let scanInProgress     = false;   // prevents concurrent scan cycles
 let lastFetchErrAlertMs = 0;      // throttle fetch-error Telegram alerts (max 1/hour)
 
+// Dedup cache: prevents identical trade alerts from two simultaneous instances
+// (Railway + local) both detecting the same signal within a 90-second window.
+const _tgRecentHashes = new Map();   // hash → sentAtMs
+const _TG_DEDUP_MS    = 90_000;
+
+function _msgHash(msg) {
+  let h = 0;
+  for (let i = 0; i < msg.length; i++) h = (Math.imul(31, h) + msg.charCodeAt(i)) | 0;
+  return h;
+}
+
 async function sendTelegram(msg) {
   const token  = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
   if (!token || !chatId) return;
+
+  // Drop duplicate trade/regime alerts within 90 seconds (not status/command replies)
+  const isTradeAlert = /BUY|SELL|CROSS|REGIME|STARTED|DUPLICATE/.test(msg);
+  if (isTradeAlert) {
+    const hash = _msgHash(msg);
+    const now  = Date.now();
+    if (_tgRecentHashes.has(hash) && now - _tgRecentHashes.get(hash) < _TG_DEDUP_MS) {
+      console.log(`[Telegram] Duplicate suppressed (same alert sent <90s ago)`);
+      return;
+    }
+    _tgRecentHashes.set(hash, now);
+    // Evict old entries
+    for (const [k, t] of _tgRecentHashes) if (now - t > _TG_DEDUP_MS) _tgRecentHashes.delete(k);
+  }
+
   try {
     await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: "POST",
