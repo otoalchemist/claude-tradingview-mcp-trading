@@ -7,13 +7,14 @@
 //   ETH-USD  : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
 //   SOL-USD  : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
 //   LINK-USD : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
-//   AKT-USD  : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
+//   AKT-USD  : 1h  EMA50/200 regime  →  15m BOS/CHOCH execution  (moved from 5m/30m — backtest)
 //   PEPE-USD : 15m EMA50/200 regime  →   1m BOS/CHOCH execution
 //
 //   Death cross  → BUY  regime: scale-in  on each bearish BOS / bullish CHOCH
 //   Golden cross → SELL regime: scale-out on each bullish BOS / bearish CHOCH
 //   Buy  ladder  : [8, 12, 18, 27]% of regime-start capital — UNLIMITED slots
 //   Sell ladder  : [15, 18, 27, 27]% of regime-start crypto  — UNLIMITED slots
+//                  BTC override: [10, 15, 22, 27]% — softer first exit for strong bull runs
 //   CHOCH        : continues scale (same per-slot %; no all-in)
 //
 // REPORTS  : 6-hour check-in (00, 06, 12, 18 UTC) + EOD at 23:55 UTC via Telegram
@@ -23,8 +24,37 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import "dotenv/config";
-import { readFileSync, writeFileSync, renameSync, existsSync, appendFileSync } from "fs";
+import { readFileSync, writeFileSync, renameSync, existsSync, appendFileSync, unlinkSync } from "fs";
 import crypto from "crypto";
+
+// ── Instance identity + duplicate detection ───────────────────────────────────
+// Each process start gets a unique 4-byte hex ID so two running instances
+// can be told apart immediately in Telegram messages and /ping output.
+const BOT_INSTANCE_ID = crypto.randomBytes(4).toString("hex").toUpperCase();
+const LOCK_FILE       = "craig-bot.lock";
+
+function acquireInstanceLock() {
+  if (existsSync(LOCK_FILE)) {
+    try {
+      const lock   = JSON.parse(readFileSync(LOCK_FILE, "utf8"));
+      const ageMs  = Date.now() - (lock.startedAt ?? 0);
+      const ageMin = (ageMs / 60_000).toFixed(1);
+      try {
+        process.kill(lock.pid, 0);   // signal 0 = is the PID still alive?
+        console.warn(`⚠ DUPLICATE — PID ${lock.pid} (id:${lock.id}) running ${ageMin}m`);
+        return { duplicate: true, otherPid: lock.pid, otherId: lock.id, ageMin };
+      } catch {
+        console.log(`[Lock] Stale lock from PID ${lock.pid} (${lock.id}) — cleared`);
+      }
+    } catch { /* corrupt lock */ }
+  }
+  writeFileSync(LOCK_FILE, JSON.stringify({ pid: process.pid, id: BOT_INSTANCE_ID, startedAt: Date.now() }));
+  const cleanup = () => { try { unlinkSync(LOCK_FILE); } catch {} };
+  process.once("exit",   cleanup);
+  process.once("SIGTERM", () => { cleanup(); process.exit(0); });
+  process.once("SIGINT",  () => { cleanup(); process.exit(0); });
+  return { duplicate: false };
+}
 
 // ── Time constants ────────────────────────────────────────────────────────────
 const HOUR_MS        = 3_600_000;
@@ -66,10 +96,12 @@ const BASE_SIZE_DECIMALS = {
 };
 
 // Per-symbol execution / regime config
+// sellLadder (optional): overrides global BOS_SCALE_PCT_SELL for this symbol only.
 const SYMBOL_CONFIG = {
   "BTC-USD": {
-    exec:  { gran: "FIFTEEN_MINUTE", secs:  900, bars: 250, label: "15m" },
-    regime:{ gran: "ONE_HOUR",       secs: 3600, bars: 400, ms: HOUR_MS,       label: "1h"  },
+    exec:      { gran: "FIFTEEN_MINUTE", secs:  900, bars: 250, label: "15m" },
+    regime:    { gran: "ONE_HOUR",       secs: 3600, bars: 400, ms: HOUR_MS,       label: "1h"  },
+    sellLadder: [10, 15, 22, 27],  // softer first exit — backtest showed early sell hurts in bull runs
   },
   "ETH-USD": {
     exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
@@ -84,8 +116,10 @@ const SYMBOL_CONFIG = {
     regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 250, ms: THIRTY_MIN_MS,  label: "30m" },
   },
   "AKT-USD": {
-    exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
-    regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 250, ms: THIRTY_MIN_MS,  label: "30m" },
+    // Moved from 5m/30m → 1h/15m. Backtest showed 5m/30m massively underperformed HODL
+    // on AKT's strong uptrend (30m EMA200 too slow; bot stuck in SELL while price rallied 70%).
+    exec:  { gran: "FIFTEEN_MINUTE", secs:  900, bars: 250, label: "15m" },
+    regime:{ gran: "ONE_HOUR",       secs: 3600, bars: 400, ms: HOUR_MS,       label: "1h"  },
   },
   "PEPE-USD": {
     exec:  { gran: "ONE_MINUTE",     secs:   60, bars: 300, label: "1m"  },
@@ -629,9 +663,10 @@ async function processSymbol(symbol) {
     // ── 4. Trade execution ───────────────────────────────────────────────────
     const dateStr = new Date(bar.t).toISOString().slice(0, 16).replace("T", " ");
 
-    // Allocation % — buy uses conservative ladder; sell uses aggressive first-slot ladder
-    const buySlot  = idx => BOS_SCALE_PCT_BUY [Math.min(idx, BOS_SCALE_PCT_BUY.length  - 1)];
-    const sellSlot = idx => BOS_SCALE_PCT_SELL[Math.min(idx, BOS_SCALE_PCT_SELL.length - 1)];
+    // Allocation % — buy uses global ladder; sell uses per-symbol override if present
+    const symSellLadder = cfg.sellLadder ?? BOS_SCALE_PCT_SELL;
+    const buySlot  = idx => BOS_SCALE_PCT_BUY[Math.min(idx, BOS_SCALE_PCT_BUY.length    - 1)];
+    const sellSlot = idx => symSellLadder    [Math.min(idx, symSellLadder.length         - 1)];
 
     // ── BUY regime ────────────────────────────────────────────────────────────
     if (state.regime === "buy") {
@@ -957,6 +992,7 @@ async function sendPing() {
     ? Math.ceil(lastScanTime / SCAN_INTERVAL_MS) * SCAN_INTERVAL_MS : null;
   const nextStr = nextMs ? new Date(nextMs).toISOString().slice(11, 16) + " UTC" : "soon";
 
+  const btcSell = SYMBOL_CONFIG["BTC-USD"].sellLadder ?? BOS_SCALE_PCT_SELL;
   await sendTelegram(
     `🏓 <b>Pong — Bot is alive</b>\n\n` +
     `Uptime    : ${uptime}\n` +
@@ -965,7 +1001,8 @@ async function sendPing() {
     `Symbols   : ${SYMBOLS.length}  [${SYMBOLS.map(s => s.replace("-USD","")).join(" · ")}]\n` +
     `Capital   : $${INITIAL_CAPITAL}/sym  ($${SYMBOLS.length * INITIAL_CAPITAL} total)\n` +
     `Buy scale : [${BOS_SCALE_PCT_BUY.join(", ")}]%  UNLIMITED\n` +
-    `Sell scale: [${BOS_SCALE_PCT_SELL.join(", ")}]%  UNLIMITED`
+    `Sell scale: [${BOS_SCALE_PCT_SELL.join(", ")}]%  (BTC: [${btcSell.join(", ")}]%)  UNLIMITED\n` +
+    `Instance  : <code>${BOT_INSTANCE_ID}</code>  ← if you see two IDs, a duplicate is running`
   );
 }
 
@@ -1137,10 +1174,11 @@ async function sendHelpMessage() {
     `/resume all    — Resume ALL symbols\n` +
     `/help          — This message\n\n` +
     `<b>Strategy</b>\n` +
-    `BTC: 1h regime / 15m exec\n` +
-    `ETH · SOL · LINK · AKT: 30m regime / 5m exec\n` +
+    `BTC · AKT: 1h regime / 15m exec\n` +
+    `ETH · SOL · LINK: 30m regime / 5m exec\n` +
     `PEPE: 15m regime / 1m exec\n` +
-    `Buy: [${BOS_SCALE_PCT_BUY.join(", ")}]%  |  Sell: [${BOS_SCALE_PCT_SELL.join(", ")}]%  UNLIMITED\n\n` +
+    `Buy: [${BOS_SCALE_PCT_BUY.join(", ")}]%  UNLIMITED\n` +
+    `Sell: [${BOS_SCALE_PCT_SELL.join(", ")}]%  (BTC [10,15,22,27]%)  UNLIMITED\n\n` +
     `⏰ Auto-reports: 00/06/12/18 UTC  +  EOD 23:55 UTC`
   );
 }
@@ -1297,6 +1335,27 @@ async function runCycle(manual = false) {
 }
 
 async function main() {
+  // ── Duplicate-instance detection ────────────────────────────────────────────
+  // Writes a lock file with this process's PID + BOT_INSTANCE_ID.
+  // On startup, if another PID is still alive we warn via Telegram immediately.
+  // NOTE: only catches same-machine duplicates (e.g. PM2 + direct node).
+  // Cross-machine duplicates (e.g. Railway + local) are identified by instance ID
+  // shown in /ping and the startup message — if you see two different IDs respond
+  // to a command, two bots are running and you need to stop one.
+  const lockResult = acquireInstanceLock();
+  if (lockResult.duplicate) {
+    console.warn(`[Lock] Duplicate detected — other instance ID: ${lockResult.otherId}`);
+    // Still send the warning even if Telegram creds aren't loaded yet (dotenv ran above)
+    await sendTelegram(
+      `⚠️ <b>DUPLICATE BOT INSTANCE DETECTED</b>\n\n` +
+      `New instance  : <code>${BOT_INSTANCE_ID}</code>\n` +
+      `Already running: PID ${lockResult.otherPid} (<code>${lockResult.otherId}</code>)` +
+      ` — running for ${lockResult.ageMin} min\n\n` +
+      `Two bots share the same Telegram token → commands get double responses.\n` +
+      `Run <code>pm2 list</code> or check Railway dashboards and stop the duplicate.`
+    );
+  }
+
   // ── Env validation ──────────────────────────────────────────────────────────
   const missingEnv = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"].filter(k => !process.env[k]);
   if (missingEnv.length) {
@@ -1319,28 +1378,34 @@ async function main() {
 
   console.log("\n" + "═".repeat(66));
   console.log(`  Craig Accumulation Bot  v2  —  ${modeLabel}`);
+  console.log(`  Instance ID: ${BOT_INSTANCE_ID}`);
   console.log("═".repeat(66));
   for (const sym of SYMBOLS) {
-    const c = SYMBOL_CONFIG[sym];
-    console.log(`  ${sym.padEnd(9)}  exec: ${c.exec.label.padEnd(4)}  regime: ${c.regime.label.padEnd(4)}  EMA${EMA_FAST}/${EMA_SLOW}`);
+    const c    = SYMBOL_CONFIG[sym];
+    const sell = (c.sellLadder ?? BOS_SCALE_PCT_SELL).join(",");
+    console.log(`  ${sym.padEnd(9)}  exec: ${c.exec.label.padEnd(4)}  regime: ${c.regime.label.padEnd(4)}  EMA${EMA_FAST}/${EMA_SLOW}  sell:[${sell}]%`);
   }
-  console.log(`  Buy     : [${BOS_SCALE_PCT_BUY.join(", ")}]%  │  Sell: [${BOS_SCALE_PCT_SELL.join(", ")}]%  │  UNLIMITED slots`);
+  console.log(`  Buy     : [${BOS_SCALE_PCT_BUY.join(", ")}]%  │  Sell (default): [${BOS_SCALE_PCT_SELL.join(", ")}]%  │  UNLIMITED slots`);
   console.log(`  Reports : 6h check-in (00/06/12/18 UTC)  +  EOD at 23:55 UTC`);
   console.log(`  Commands: /ping /price /status /report /trades /hist /scan /btc /eth /sol /link /akt /pepe /help`);
   console.log(`  Capital : $${INITIAL_CAPITAL}/symbol  │  Scan: every 5 min`);
   console.log("═".repeat(66) + "\n");
 
+  const btcSellLadder = (SYMBOL_CONFIG["BTC-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(", ");
   await sendTelegram(
     `🤖 <b>Craig Accumulation Bot v2 — STARTED</b>\n` +
-    `BTC:  1h  regime / 15m exec\n` +
-    `ETH · SOL · LINK · AKT:  30m regime / 5m exec\n` +
+    `Instance: <code>${BOT_INSTANCE_ID}</code>\n\n` +
+    `BTC · AKT:  1h  regime / 15m exec\n` +
+    `ETH · SOL · LINK:  30m regime / 5m exec\n` +
     `PEPE: 15m regime / 1m exec\n` +
     `Buy:  [${BOS_SCALE_PCT_BUY.join(", ")}]%  UNLIMITED\n` +
-    `Sell: [${BOS_SCALE_PCT_SELL.join(", ")}]%  UNLIMITED\n` +
+    `Sell: [${BOS_SCALE_PCT_SELL.join(", ")}]%  UNLIMITED  (BTC: [${btcSellLadder}]%)\n` +
     `Reports: every 6h + EOD at 23:55 UTC\n` +
     `Commands: /ping /price /status /report /trades /hist /scan\n` +
     `Per symbol: /btc /eth /sol /link /akt /pepe  |  /help for full list\n` +
-    `Capital: $${INITIAL_CAPITAL}/symbol  │  ${modeLabelTg}`
+    `Capital: $${INITIAL_CAPITAL}/symbol  │  ${modeLabelTg}\n\n` +
+    `⚠️ If you see TWO of these start messages, a duplicate bot is running.\n` +
+    `Use /ping to compare instance IDs — stop the older one.`
   );
 
   // Start Telegram command listener — auto-restarts on crash with a 30s delay
