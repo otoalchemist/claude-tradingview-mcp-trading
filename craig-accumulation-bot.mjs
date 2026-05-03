@@ -24,14 +24,16 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import "dotenv/config";
-import { readFileSync, writeFileSync, renameSync, existsSync, appendFileSync, unlinkSync } from "fs";
+import path from "path";
+import { readFileSync, writeFileSync, renameSync, existsSync, appendFileSync, unlinkSync,
+         mkdirSync, copyFileSync } from "fs";
 import crypto from "crypto";
 
 // ── Instance identity + duplicate detection ───────────────────────────────────
 // Each process start gets a unique 4-byte hex ID so two running instances
 // can be told apart immediately in Telegram messages and /ping output.
 const BOT_INSTANCE_ID = crypto.randomBytes(4).toString("hex").toUpperCase();
-const LOCK_FILE       = "craig-bot.lock";
+const LOCK_FILE       = path.join(STATE_DIR, "craig-bot.lock");
 
 function acquireInstanceLock() {
   if (existsSync(LOCK_FILE)) {
@@ -73,8 +75,17 @@ const REQUIRE_BOS_BEFORE_CHOCH = true;
 const CHOCH_CONTINUE_SCALE     = true;
 const SCAN_INTERVAL_MS     = 5 * 60 * 1000;   // scan every 5 min
 const CB_MAX               = 350;
-const TRADES_LOG           = "craig-accum-trades.jsonl";
 const WARMUP               = SWING_LB * 2 + 2;
+
+// ── Persistent state directory ────────────────────────────────────────────────
+// Locally defaults to "." (working directory).
+// On Railway set STATE_DIR=/app/data and mount a persistent Volume at /app/data
+// so state files survive redeploys.
+// SEED_DIR holds the one-time bootstrap copies committed to git; they are copied
+// to STATE_DIR on first run if STATE_DIR doesn't already have them.
+const STATE_DIR  = (process.env.STATE_DIR ?? ".").replace(/\/+$/, "");
+const SEED_DIR   = path.join(path.dirname(new URL(import.meta.url).pathname), "data");
+const TRADES_LOG        = path.join(STATE_DIR, "craig-accum-trades.jsonl");
 const MAX_TRADES_IN_STATE  = 500;              // cap trades[] in state file to prevent unbounded growth
 const MIN_ORDER_USD        = 1.00;             // minimum buy size (raise to exchange minimum before live)
 const MIN_ORDER_QTY        = 1e-8;             // minimum sell qty (dust threshold)
@@ -394,7 +405,7 @@ function buildRegime(candles, periodMs) {
 }
 
 // ── State persistence ─────────────────────────────────────────────────────────
-function stateFile(symbol) { return `craig-state-${symbol}.json`; }
+function stateFile(symbol) { return path.join(STATE_DIR, `craig-state-${symbol}.json`); }
 
 function makeFreshState(symbol) {
   const cfg = SYMBOL_CONFIG[symbol];
@@ -783,7 +794,7 @@ async function processSymbol(symbol) {
 // ── Periodic reporting ────────────────────────────────────────────────────────
 // Report state persisted to disk so a bot restart within a 6h window
 // does not fire a duplicate report on the very next scan.
-const REPORT_STATE_FILE = "craig-accum-report-state.json";
+const REPORT_STATE_FILE = path.join(STATE_DIR, "craig-accum-report-state.json");
 
 function loadReportState() {
   try {
@@ -1335,6 +1346,10 @@ async function runCycle(manual = false) {
 }
 
 async function main() {
+  // ── State directory + seed bootstrap ───────────────────────────────────────
+  // Must run before any file reads so STATE_DIR exists and is populated.
+  seedStateDir();
+
   // ── Duplicate-instance detection ────────────────────────────────────────────
   // Writes a lock file with this process's PID + BOT_INSTANCE_ID.
   // On startup, if another PID is still alive we warn via Telegram immediately.
@@ -1436,6 +1451,47 @@ async function main() {
     const drift = Date.now() % SCAN_INTERVAL_MS;
     setTimeout(loop, drift > 0 ? SCAN_INTERVAL_MS - drift : SCAN_INTERVAL_MS);
   }, waitMs);
+}
+
+// ── State directory bootstrap ─────────────────────────────────────────────────
+// Ensures STATE_DIR exists, then copies any seed files from ./data/ that don't
+// yet exist in STATE_DIR. Seed files are committed to git once so Railway's
+// volume starts with the correct state rather than reinitialising from scratch.
+// On subsequent deploys the volume files already exist — seed is a no-op.
+function seedStateDir() {
+  // Ensure the directory exists (important when STATE_DIR=/app/data and volume just mounted)
+  try { mkdirSync(STATE_DIR, { recursive: true }); } catch {}
+
+  if (!existsSync(SEED_DIR)) {
+    console.log(`[Seed] No seed directory found at ${SEED_DIR} — skipping`);
+    return;
+  }
+
+  const candidates = [
+    ...SYMBOLS.map(s => `craig-state-${s}.json`),
+    "craig-accum-trades.jsonl",
+    "craig-accum-report-state.json",
+  ];
+
+  let copied = 0;
+  for (const fname of candidates) {
+    const src = path.join(SEED_DIR, fname);
+    const dst = path.join(STATE_DIR, fname);
+    if (existsSync(src) && !existsSync(dst)) {
+      try {
+        copyFileSync(src, dst);
+        console.log(`[Seed] ✓ ${fname} → ${STATE_DIR}`);
+        copied++;
+      } catch (e) {
+        console.error(`[Seed] Failed to copy ${fname}: ${e.message}`);
+      }
+    }
+  }
+  if (copied === 0) {
+    console.log(`[Seed] STATE_DIR already populated — no files copied`);
+  } else {
+    console.log(`[Seed] Copied ${copied} seed file(s) into ${STATE_DIR}`);
+  }
 }
 
 main().catch(async err => {

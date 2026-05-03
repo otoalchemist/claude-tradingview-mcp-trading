@@ -1,0 +1,60 @@
+{
+  "symbol": "LINK-USD",
+  "execGran": "FIVE_MINUTE",
+  "initialized": true,
+  "regime": "buy",
+  "bosCount": 3,
+  "cash": 310,
+  "cryptoQty": 20.759315694575506,
+  "regimeStartCapital": 500,
+  "regimeStartCryptoQty": 0,
+  "regimeStartPrice": 9.163,
+  "lastPrice": 9.09,
+  "structure": -1,
+  "lastSH": {
+    "price": 9.214,
+    "t": 1777762500000
+  },
+  "lastSL": {
+    "price": 9.143,
+    "t": 1777767300000
+  },
+  "lastProcessedBarT": 1777774200000,
+  "trades": [
+    {
+      "symbol": "LINK-USD",
+      "t": 1777742400000,
+      "type": "scaled_buy",
+      "bosNum": 1,
+      "price": 9.144,
+      "usd": 40,
+      "qty": 4.374453193350831,
+      "ts": "2026-05-02T17:20:00.000Z"
+    },
+    {
+      "symbol": "LINK-USD",
+      "t": 1777743300000,
+      "type": "scaled_buy",
+      "bosNum": 2,
+      "price": 9.144,
+      "usd": 60,
+      "qty": 6.561679790026247,
+      "ts": "2026-05-02T17:35:00.000Z"
+    },
+    {
+      "symbol": "LINK-USD",
+      "t": 1777749000000,
+      "type": "choch_buy",
+      "bosNum": 3,
+      "price": 9.162,
+      "usd": 90,
+      "qty": 9.823182711198427,
+      "ts": "2026-05-02T19:10:00.000Z"
+    }
+  ],
+  "regimeCount": {
+    "buy": 1,
+    "sell": 0
+  },
+  "tradingPaused": false
+}

@@ -1,0 +1,29 @@
+{
+  "symbol": "BTC-USD",
+  "execGran": "FIFTEEN_MINUTE",
+  "initialized": true,
+  "regime": "sell",
+  "bosCount": 0,
+  "cash": 500,
+  "cryptoQty": 0,
+  "regimeStartCapital": 500,
+  "regimeStartCryptoQty": 0,
+  "structure": -1,
+  "lastSH": {
+    "price": 79155,
+    "t": 1777757400000
+  },
+  "lastSL": {
+    "price": 78415.02,
+    "t": 1777754700000
+  },
+  "lastProcessedBarT": 1777773600000,
+  "trades": [],
+  "regimeCount": {
+    "buy": 0,
+    "sell": 1
+  },
+  "lastPrice": 78261.74,
+  "regimeStartPrice": 0,
+  "tradingPaused": false
+}

@@ -1,0 +1,29 @@
+{
+  "symbol": "PEPE-USD",
+  "execGran": "ONE_MINUTE",
+  "initialized": true,
+  "regime": "sell",
+  "bosCount": 0,
+  "cash": 500,
+  "cryptoQty": 0,
+  "regimeStartCapital": 500,
+  "regimeStartCryptoQty": 0,
+  "regimeStartPrice": 0.00000394,
+  "lastPrice": 0.00000393,
+  "structure": -1,
+  "lastSH": {
+    "price": 0.00000394,
+    "t": 1777773000000
+  },
+  "lastSL": {
+    "price": 0.00000395,
+    "t": 1777767300000
+  },
+  "lastProcessedBarT": 1777774440000,
+  "trades": [],
+  "regimeCount": {
+    "buy": 0,
+    "sell": 1
+  },
+  "tradingPaused": false
+}

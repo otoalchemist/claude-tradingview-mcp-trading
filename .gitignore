@@ -9,6 +9,15 @@ node_modules/
 # Runtime state & trade data (machine-local, not for version control)
 craig-state-*.json
 craig-accum-trades.jsonl
+craig-accum-report-state.json
+craig-bot.lock
+
+# data/ holds one-time seed files committed to git for Railway volume bootstrap.
+# These are intentionally tracked — Railway copies them to the volume on first deploy.
+# To refresh: cp craig-state-*.json craig-accum-report-state.json data/
+!data/
+!data/*.json
+!data/*.jsonl
 
 # Screenshots
 *.png

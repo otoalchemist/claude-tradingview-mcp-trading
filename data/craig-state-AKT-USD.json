@@ -1,0 +1,29 @@
+{
+  "symbol": "AKT-USD",
+  "execGran": "FIVE_MINUTE",
+  "initialized": true,
+  "regime": "sell",
+  "bosCount": 0,
+  "cash": 500,
+  "cryptoQty": 0,
+  "regimeStartCapital": 500,
+  "regimeStartCryptoQty": 0,
+  "regimeStartPrice": 0.557,
+  "lastPrice": 0.574,
+  "structure": 1,
+  "lastSH": {
+    "price": 0.578,
+    "t": 1777767900000
+  },
+  "lastSL": {
+    "price": 0.568,
+    "t": 1777772400000
+  },
+  "lastProcessedBarT": 1777774200000,
+  "trades": [],
+  "regimeCount": {
+    "buy": 0,
+    "sell": 1
+  },
+  "tradingPaused": false
+}

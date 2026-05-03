@@ -1,0 +1,29 @@
+{
+  "symbol": "SOL-USD",
+  "execGran": "FIVE_MINUTE",
+  "initialized": true,
+  "regime": "sell",
+  "bosCount": 0,
+  "cash": 500,
+  "cryptoQty": 0,
+  "regimeStartCapital": 500,
+  "regimeStartCryptoQty": 0,
+  "structure": -1,
+  "lastSH": {
+    "price": 84.2,
+    "t": 1777768200000
+  },
+  "lastSL": {
+    "price": 83.82,
+    "t": 1777767300000
+  },
+  "lastProcessedBarT": 1777774200000,
+  "trades": [],
+  "regimeCount": {
+    "buy": 2,
+    "sell": 2
+  },
+  "lastPrice": 83.69,
+  "regimeStartPrice": 83.93,
+  "tradingPaused": false
+}
