@@ -197,7 +197,6 @@ async function registerBotCommands() {
     { command: "eth",    description: "ETH-USD snapshot" },
     { command: "sol",    description: "SOL-USD snapshot" },
     { command: "link",   description: "LINK-USD snapshot" },
-    { command: "akt",    description: "AKT-USD snapshot" },
     { command: "pepe",   description: "PEPE-USD snapshot" },
     { command: "help",   description: "Full command list + strategy info" },
   ];
@@ -1195,7 +1194,7 @@ async function sendHelpMessage() {
     `/trades — Today's trades by symbol\n` +
     `/hist   — Last 20 trades across all symbols\n\n` +
     `<b>Per Symbol</b>\n` +
-    `/btc /eth /sol /link /akt /pepe — Symbol snapshot\n\n` +
+    `/btc /eth /sol /link /pepe — Symbol snapshot\n\n` +
     `<b>Control</b>\n` +
     `/scan          — Trigger immediate scan now\n` +
     `/pause &lt;sym&gt;  — Pause trading for a symbol (btc, eth, sol…)\n` +
@@ -1204,7 +1203,7 @@ async function sendHelpMessage() {
     `/resume all    — Resume ALL symbols\n` +
     `/help          — This message\n\n` +
     `<b>Strategy</b>\n` +
-    `BTC · AKT: 1h regime / 15m exec\n` +
+    `BTC: 1h regime / 15m exec\n` +
     `ETH · SOL · LINK: 30m regime / 5m exec\n` +
     `PEPE: 15m regime / 1m exec\n` +
     `Buy: [${BOS_SCALE_PCT_BUY.join(", ")}]%  UNLIMITED\n` +
@@ -1258,7 +1257,7 @@ async function startTelegramPoller() {
         console.log(`[Telegram] Command received: "${text}"`);
 
         // Per-symbol shortcuts
-        const SHORTCUTS = { "/btc":"BTC-USD", "/eth":"ETH-USD", "/sol":"SOL-USD", "/link":"LINK-USD", "/akt":"AKT-USD", "/pepe":"PEPE-USD" };
+        const SHORTCUTS = { "/btc":"BTC-USD", "/eth":"ETH-USD", "/sol":"SOL-USD", "/link":"LINK-USD", "/pepe":"PEPE-USD" };
 
         // Parse optional argument for /pause and /resume: "/pause btc" → arg="btc"
         const [cmd, cmdArg] = text.split(/\s+/, 2);
@@ -1421,7 +1420,7 @@ async function main() {
   }
   console.log(`  Buy     : [${BOS_SCALE_PCT_BUY.join(", ")}]%  │  Sell (default): [${BOS_SCALE_PCT_SELL.join(", ")}]%  │  UNLIMITED slots`);
   console.log(`  Reports : 6h check-in (00/06/12/18 UTC)  +  EOD at 23:55 UTC`);
-  console.log(`  Commands: /ping /price /status /report /trades /hist /scan /btc /eth /sol /link /akt /pepe /help`);
+  console.log(`  Commands: /ping /price /status /report /trades /hist /scan /btc /eth /sol /link /pepe /help`);
   console.log(`  Capital : $${INITIAL_CAPITAL}/symbol  │  Scan: every 5 min`);
   console.log("═".repeat(66) + "\n");
 
@@ -1429,14 +1428,14 @@ async function main() {
   await sendTelegram(
     `🤖 <b>Craig Accumulation Bot v2 — STARTED</b>\n` +
     `Instance: <code>${BOT_INSTANCE_ID}</code>\n\n` +
-    `BTC · AKT:  1h  regime / 15m exec\n` +
-    `ETH · SOL · LINK:  30m regime / 5m exec\n` +
+    `BTC: 1h regime / 15m exec\n` +
+    `ETH · SOL · LINK: 30m regime / 5m exec\n` +
     `PEPE: 15m regime / 1m exec\n` +
     `Buy:  [${BOS_SCALE_PCT_BUY.join(", ")}]%  UNLIMITED\n` +
     `Sell: [${BOS_SCALE_PCT_SELL.join(", ")}]%  UNLIMITED  (BTC: [${btcSellLadder}]%)\n` +
     `Reports: every 6h + EOD at 23:55 UTC\n` +
     `Commands: /ping /price /status /report /trades /hist /scan\n` +
-    `Per symbol: /btc /eth /sol /link /akt /pepe  |  /help for full list\n` +
+    `Per symbol: /btc /eth /sol /link /pepe  |  /help for full list\n` +
     `Capital: $${INITIAL_CAPITAL}/symbol  │  ${modeLabelTg}\n\n` +
     `⚠️ If you see TWO of these start messages, a duplicate bot is running.\n` +
     `Use /ping to compare instance IDs — stop the older one.`
