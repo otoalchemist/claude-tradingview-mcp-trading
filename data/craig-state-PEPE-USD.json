@@ -1,29 +1,20 @@
 {
   "symbol": "PEPE-USD",
   "execGran": "ONE_MINUTE",
-  "initialized": true,
-  "regime": "sell",
+  "initialized": false,
+  "tradingPaused": false,
+  "regime": "neutral",
   "bosCount": 0,
-  "cash": 500,
+  "cash": 100,
   "cryptoQty": 0,
-  "regimeStartCapital": 500,
+  "regimeStartCapital": 100,
   "regimeStartCryptoQty": 0,
-  "regimeStartPrice": 0.00000394,
-  "lastPrice": 0.00000393,
-  "structure": -1,
-  "lastSH": {
-    "price": 0.00000394,
-    "t": 1777773000000
-  },
-  "lastSL": {
-    "price": 0.00000395,
-    "t": 1777767300000
-  },
-  "lastProcessedBarT": 1777774440000,
+  "regimeStartPrice": 0,
+  "lastPrice": 0,
+  "structure": 0,
+  "lastSH": null,
+  "lastSL": null,
+  "lastProcessedBarT": 0,
   "trades": [],
-  "regimeCount": {
-    "buy": 0,
-    "sell": 1
-  },
-  "tradingPaused": false
+  "regimeCount": { "buy": 0, "sell": 0 }
 }

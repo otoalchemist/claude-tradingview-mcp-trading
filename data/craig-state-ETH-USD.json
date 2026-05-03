@@ -1,29 +1,20 @@
 {
   "symbol": "ETH-USD",
   "execGran": "FIVE_MINUTE",
-  "initialized": true,
-  "regime": "sell",
+  "initialized": false,
+  "tradingPaused": false,
+  "regime": "neutral",
   "bosCount": 0,
-  "cash": 500,
+  "cash": 100,
   "cryptoQty": 0,
-  "regimeStartCapital": 500,
+  "regimeStartCapital": 100,
   "regimeStartCryptoQty": 0,
-  "structure": -1,
-  "lastSH": {
-    "price": 2317,
-    "t": 1777768500000
-  },
-  "lastSL": {
-    "price": 2309.14,
-    "t": 1777767300000
-  },
-  "lastProcessedBarT": 1777774200000,
-  "trades": [],
-  "regimeCount": {
-    "buy": 0,
-    "sell": 1
-  },
-  "lastPrice": 2302.6,
   "regimeStartPrice": 0,
-  "tradingPaused": false
+  "lastPrice": 0,
+  "structure": 0,
+  "lastSH": null,
+  "lastSL": null,
+  "lastProcessedBarT": 0,
+  "trades": [],
+  "regimeCount": { "buy": 0, "sell": 0 }
 }

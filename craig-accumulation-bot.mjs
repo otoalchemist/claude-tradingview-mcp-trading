@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // ═══════════════════════════════════════════════════════════════════════════
-// craig-accumulation-bot.mjs  — Live Paper Trading  (v2)
+// craig-accumulation-bot.mjs  — Live Trading  (v2)
 //
 // STRATEGY (per-symbol timeframes):
 //   BTC-USD  : 1h  EMA50/200 regime  →  15m BOS/CHOCH execution
@@ -74,7 +74,7 @@ const FIFTEEN_MIN_MS =   900_000;
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const SYMBOLS              = ["BTC-USD", "ETH-USD", "SOL-USD", "LINK-USD", "PEPE-USD"];
-const INITIAL_CAPITAL      = 500;
+const INITIAL_CAPITAL      = 100;
 const EMA_FAST             = 50;
 const EMA_SLOW             = 200;
 const SWING_LB             = 5;
@@ -87,7 +87,7 @@ const CB_MAX               = 350;
 const WARMUP               = SWING_LB * 2 + 2;
 
 const MAX_TRADES_IN_STATE  = 500;              // cap trades[] in state file to prevent unbounded growth
-const MIN_ORDER_USD        = 1.00;             // minimum buy size (raise to exchange minimum before live)
+const MIN_ORDER_USD        = 1.00;             // Coinbase Advanced Trade minimum order size
 const MIN_ORDER_QTY        = 1e-8;             // minimum sell qty (dust threshold)
 
 // ── Live trading flag ─────────────────────────────────────────────────────────
@@ -1367,6 +1367,21 @@ async function main() {
   // ── State directory + seed bootstrap ───────────────────────────────────────
   // Must run before any file reads so STATE_DIR exists and is populated.
   seedStateDir();
+
+  // ── One-time state wipe (e.g. paper → live migration) ──────────────────────
+  // Set RESET_STATE=true in Railway env vars, deploy once, then remove it.
+  // Deletes all symbol state files so the bot re-initialises fresh with live balances.
+  if (process.env.RESET_STATE === "true") {
+    console.log("[Reset] RESET_STATE=true — wiping all symbol state files");
+    for (const sym of SYMBOLS) {
+      const f = stateFile(sym);
+      if (existsSync(f)) { unlinkSync(f); console.log(`[Reset] Deleted ${f}`); }
+    }
+    if (existsSync(TRADES_LOG)) { unlinkSync(TRADES_LOG); console.log("[Reset] Deleted trades log"); }
+    const reportState = path.join(STATE_DIR, "craig-accum-report-state.json");
+    if (existsSync(reportState)) { unlinkSync(reportState); }
+    console.log("[Reset] Done — bot will initialise fresh. Remove RESET_STATE from env after this deploy.");
+  }
 
   // ── Duplicate-instance detection ────────────────────────────────────────────
   // Writes a lock file with this process's PID + BOT_INSTANCE_ID.
