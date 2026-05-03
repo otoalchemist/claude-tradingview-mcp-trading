@@ -110,24 +110,24 @@ const BASE_SIZE_DECIMALS = {
 const SYMBOL_CONFIG = {
   "BTC-USD": {
     exec:      { gran: "FIFTEEN_MINUTE", secs:  900, bars: 250, label: "15m" },
-    regime:    { gran: "ONE_HOUR",       secs: 3600, bars: 400, ms: HOUR_MS,       label: "1h"  },
+    regime:    { gran: "ONE_HOUR",       secs: 3600, bars: 600, ms: HOUR_MS,       label: "1h"  },
     sellLadder: [10, 15, 22, 27],  // softer first exit — backtest showed early sell hurts in bull runs
   },
   "ETH-USD": {
     exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
-    regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 250, ms: THIRTY_MIN_MS, label: "30m" },
+    regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 600, ms: THIRTY_MIN_MS, label: "30m" },
   },
   "SOL-USD": {
     exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
-    regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 250, ms: THIRTY_MIN_MS,  label: "30m" },
+    regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 600, ms: THIRTY_MIN_MS,  label: "30m" },
   },
   "LINK-USD": {
     exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
-    regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 250, ms: THIRTY_MIN_MS,  label: "30m" },
+    regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 600, ms: THIRTY_MIN_MS,  label: "30m" },
   },
   "PEPE-USD": {
     exec:  { gran: "ONE_MINUTE",     secs:   60, bars: 300, label: "1m"  },
-    regime:{ gran: "FIFTEEN_MINUTE", secs:  900, bars: 250, ms: FIFTEEN_MIN_MS, label: "15m" },
+    regime:{ gran: "FIFTEEN_MINUTE", secs:  900, bars: 600, ms: FIFTEEN_MIN_MS, label: "15m" },
   },
 };
 
@@ -551,7 +551,7 @@ async function processSymbol(symbol) {
     return;
   }
 
-  if (candlesExec.length < 50 || candlesRegime.length < 220) {
+  if (candlesExec.length < 50 || candlesRegime.length < 520) {
     console.log(`[${symbol}] Insufficient candles — skipping (exec:${candlesExec.length} regime:${candlesRegime.length})`);
     return;
   }
