@@ -7,7 +7,6 @@
 //   ETH-USD  : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
 //   SOL-USD  : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
 //   LINK-USD : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
-//   AKT-USD  : 1h  EMA50/200 regime  →  15m BOS/CHOCH execution  (moved from 5m/30m — backtest)
 //   PEPE-USD : 15m EMA50/200 regime  →   1m BOS/CHOCH execution
 //
 //   Death cross  → BUY  regime: scale-in  on each bearish BOS / bullish CHOCH
@@ -74,7 +73,7 @@ const THIRTY_MIN_MS  = 1_800_000;
 const FIFTEEN_MIN_MS =   900_000;
 
 // ── Config ────────────────────────────────────────────────────────────────────
-const SYMBOLS              = ["BTC-USD", "ETH-USD", "SOL-USD", "LINK-USD", "AKT-USD", "PEPE-USD"];
+const SYMBOLS              = ["BTC-USD", "ETH-USD", "SOL-USD", "LINK-USD", "PEPE-USD"];
 const INITIAL_CAPITAL      = 500;
 const EMA_FAST             = 50;
 const EMA_SLOW             = 200;
@@ -103,7 +102,6 @@ const BASE_SIZE_DECIMALS = {
   "ETH-USD":  8,
   "SOL-USD":  6,
   "LINK-USD": 4,
-  "AKT-USD":  4,
   "PEPE-USD": 0,   // integer PEPE only
 };
 
@@ -126,12 +124,6 @@ const SYMBOL_CONFIG = {
   "LINK-USD": {
     exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
     regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 250, ms: THIRTY_MIN_MS,  label: "30m" },
-  },
-  "AKT-USD": {
-    // Moved from 5m/30m → 1h/15m. Backtest showed 5m/30m massively underperformed HODL
-    // on AKT's strong uptrend (30m EMA200 too slow; bot stuck in SELL while price rallied 70%).
-    exec:  { gran: "FIFTEEN_MINUTE", secs:  900, bars: 250, label: "15m" },
-    regime:{ gran: "ONE_HOUR",       secs: 3600, bars: 400, ms: HOUR_MS,       label: "1h"  },
   },
   "PEPE-USD": {
     exec:  { gran: "ONE_MINUTE",     secs:   60, bars: 300, label: "1m"  },
