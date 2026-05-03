@@ -127,6 +127,8 @@ async function registerBotCommands() {
     { command: "trades", description: "Today's trades by symbol" },
     { command: "hist",   description: "Last 20 trades across all symbols" },
     { command: "scan",   description: "Trigger an immediate scan now" },
+    { command: "pause",  description: "Pause a symbol: /pause btc  or  /pause all" },
+    { command: "resume", description: "Resume a symbol: /resume btc  or  /resume all" },
     { command: "btc",    description: "BTC-USD snapshot" },
     { command: "eth",    description: "ETH-USD snapshot" },
     { command: "sol",    description: "SOL-USD snapshot" },
@@ -366,6 +368,7 @@ function makeFreshState(symbol) {
     symbol,
     execGran:             cfg.exec.gran,   // detect timeframe migrations on restart
     initialized:          false,
+    tradingPaused:        false,           // per-symbol pause via /pause command
     regime:               "neutral",
     bosCount:             0,
     cash:                 INITIAL_CAPITAL,
@@ -400,6 +403,7 @@ function loadState(symbol) {
     if (!("lastPrice"            in state)) state.lastPrice            = 0;
     if (!("regimeStartPrice"     in state)) state.regimeStartPrice     = 0;
     if (!("regimeStartCryptoQty" in state)) state.regimeStartCryptoQty = 0;
+    if (!("tradingPaused"        in state)) state.tradingPaused        = false;
     return state;
   } catch {
     return makeFreshState(symbol);
@@ -430,6 +434,19 @@ async function processSymbol(symbol) {
     state = loadState(symbol);
   } catch (e) {
     console.error(`[${symbol}] State load error: ${e.message}`);
+    return;
+  }
+
+  // ── Per-symbol pause check ────────────────────────────────────────────────────
+  // Still fetch candles so lastPrice stays current for reports, but skip all
+  // trade-signal logic.
+  if (state.tradingPaused) {
+    console.log(`[${symbol}] ⏸ PAUSED — skipping signals`);
+    // Best-effort price update so /status and /report still show live price
+    try {
+      const bars = await fetchCandles(symbol, cfg.exec.gran, cfg.exec.secs, 2);
+      if (bars.length) { state.lastPrice = bars.at(-1).c; saveState(symbol, state); }
+    } catch {}
     return;
   }
 
@@ -820,8 +837,10 @@ function buildSymbolReport(symbol) {
   const freshStr = barAgeMin !== null
     ? (barAgeMin < 10 ? `  🟢 ${barAgeMin}m ago` : `  🟡 ${barAgeMin}m ago`) : "";
 
+  const pausedBadge = s.tradingPaused ? "  ⏸ <b>PAUSED</b>" : "";
+
   return (
-    `<b>${symbol}</b>  [${s.regime.toUpperCase()}]  ${cfg.exec.label}/${cfg.regime.label}${freshStr}\n` +
+    `<b>${symbol}</b>  [${s.regime.toUpperCase()}]  ${cfg.exec.label}/${cfg.regime.label}${freshStr}${pausedBadge}\n` +
     `Value: $${portVal.toFixed(2)}  (${pnlSign}${pnlPct.toFixed(2)}%)  @ ${fPrice(price)}` +
     hodlLine +
     deployLine +
@@ -990,7 +1009,8 @@ async function sendRegimeOverview() {
           ? ((1 - s.cryptoQty / s.regimeStartCryptoQty) * 100).toFixed(0) : "—";
         detail = `sold:${sp}% sig:${s.bosCount}`;
       }
-      lines.push(`${icon} ${name} [${reg}] $${val.toFixed(2)} (${pnlS})  ${detail}`);
+      const pauseTag = s.tradingPaused ? " ⏸" : "";
+      lines.push(`${icon} ${name} [${reg}] $${val.toFixed(2)} (${pnlS})  ${detail}${pauseTag}`);
     } catch { lines.push(`❌ ${sym}  error`); }
   }
   const totalStart = SYMBOLS.length * INITIAL_CAPITAL;
@@ -1035,6 +1055,67 @@ async function sendTradeHistory() {
   );
 }
 
+// ── Per-symbol pause / resume ─────────────────────────────────────────────────
+// Resolves a short name ("btc", "eth", "akt"…) or "all" to symbol(s).
+function resolveSymbol(arg) {
+  if (!arg) return [];
+  const a = arg.toUpperCase();
+  if (a === "ALL") return [...SYMBOLS];
+  // exact match first (e.g. "AKT-USD")
+  if (SYMBOLS.includes(a)) return [a];
+  // short name match: "BTC" → "BTC-USD"
+  const hit = SYMBOLS.find(s => s.startsWith(a + "-") || s === a);
+  return hit ? [hit] : [];
+}
+
+async function cmdPauseSymbol(arg) {
+  const targets = resolveSymbol(arg);
+  if (!targets.length) {
+    await sendTelegram(`❓ Unknown symbol: <code>${arg}</code>\nUse: /pause btc  or  /pause all`);
+    return;
+  }
+  const changed = [];
+  for (const sym of targets) {
+    const state = loadState(sym);
+    if (!state.tradingPaused) {
+      state.tradingPaused = true;
+      saveState(sym, state);
+      changed.push(sym);
+    }
+  }
+  if (!changed.length) {
+    await sendTelegram(`ℹ️ ${targets.map(s => s.replace("-USD","")).join(", ")} already paused.`);
+  } else {
+    const names = changed.map(s => s.replace("-USD","")).join(", ");
+    await sendTelegram(`⏸ <b>${names}</b> trading PAUSED.\nSignals will be skipped until you send /resume ${arg.toLowerCase()}`);
+    console.log(`[Telegram] PAUSED: ${changed.join(", ")}`);
+  }
+}
+
+async function cmdResumeSymbol(arg) {
+  const targets = resolveSymbol(arg);
+  if (!targets.length) {
+    await sendTelegram(`❓ Unknown symbol: <code>${arg}</code>\nUse: /resume btc  or  /resume all`);
+    return;
+  }
+  const changed = [];
+  for (const sym of targets) {
+    const state = loadState(sym);
+    if (state.tradingPaused) {
+      state.tradingPaused = false;
+      saveState(sym, state);
+      changed.push(sym);
+    }
+  }
+  if (!changed.length) {
+    await sendTelegram(`ℹ️ ${targets.map(s => s.replace("-USD","")).join(", ")} already active.`);
+  } else {
+    const names = changed.map(s => s.replace("-USD","")).join(", ");
+    await sendTelegram(`▶️ <b>${names}</b> trading RESUMED.\nSignals active again.`);
+    console.log(`[Telegram] RESUMED: ${changed.join(", ")}`);
+  }
+}
+
 async function sendHelpMessage() {
   await sendTelegram(
     `🤖 <b>Craig Accum Bot v2 — Commands</b>\n\n` +
@@ -1049,8 +1130,12 @@ async function sendHelpMessage() {
     `<b>Per Symbol</b>\n` +
     `/btc /eth /sol /link /akt /pepe — Symbol snapshot\n\n` +
     `<b>Control</b>\n` +
-    `/scan   — Trigger immediate scan now\n` +
-    `/help   — This message\n\n` +
+    `/scan          — Trigger immediate scan now\n` +
+    `/pause &lt;sym&gt;  — Pause trading for a symbol (btc, eth, sol…)\n` +
+    `/resume &lt;sym&gt; — Resume trading for a symbol\n` +
+    `/pause all     — Pause ALL symbols\n` +
+    `/resume all    — Resume ALL symbols\n` +
+    `/help          — This message\n\n` +
     `<b>Strategy</b>\n` +
     `BTC: 1h regime / 15m exec\n` +
     `ETH · SOL · LINK · AKT: 30m regime / 5m exec\n` +
@@ -1099,30 +1184,39 @@ async function startTelegramPoller() {
         // Only respond to the authorized chat
         if (String(msg.chat.id) !== String(chatId)) continue;
 
-        const text = (msg.text || "").trim().toLowerCase().split("@")[0];  // strip @botname suffix
+        // Preserve original case for pause/resume argument (symbol name)
+        const rawText = (msg.text || "").trim().split("@")[0];
+        const text    = rawText.toLowerCase();
         console.log(`[Telegram] Command received: "${text}"`);
 
         // Per-symbol shortcuts
         const SHORTCUTS = { "/btc":"BTC-USD", "/eth":"ETH-USD", "/sol":"SOL-USD", "/link":"LINK-USD", "/akt":"AKT-USD", "/pepe":"PEPE-USD" };
 
-        if      (text === "/ping"    || text === "/p")  { await sendPing(); }
-        else if (text === "/price"   || text === "/px") { await sendPrices(); }
-        else if (text === "/status"  || text === "/s")  { await sendRegimeOverview(); }
-        else if (text === "/report"  || text === "/r")  { await sendPortfolioReport(false); }
-        else if (text === "/trades"  || text === "/t")  { await sendTodaysTrades(); }
-        else if (text === "/hist"    || text === "/history") { await sendTradeHistory(); }
-        else if (text === "/scan"    || text === "/sc") {
+        // Parse optional argument for /pause and /resume: "/pause btc" → arg="btc"
+        const [cmd, cmdArg] = text.split(/\s+/, 2);
+
+        if      (cmd === "/ping"    || cmd === "/p")  { await sendPing(); }
+        else if (cmd === "/price"   || cmd === "/px") { await sendPrices(); }
+        else if (cmd === "/status"  || cmd === "/s")  { await sendRegimeOverview(); }
+        else if (cmd === "/report"  || cmd === "/r")  { await sendPortfolioReport(false); }
+        else if (cmd === "/trades"  || cmd === "/t")  { await sendTodaysTrades(); }
+        else if (cmd === "/hist"    || cmd === "/history") { await sendTradeHistory(); }
+        else if (cmd === "/scan"    || cmd === "/sc") {
           if (scanInProgress) {
             await sendTelegram("⏳ Scan already in progress — please wait.");
           } else {
             await sendTelegram("🔄 Manual scan triggered...");
             runCycle(true).catch(e => sendTelegram(`❌ Scan error: ${e.message}`));
           }
-        } else if (SHORTCUTS[text]) {
-          await sendTelegram(buildSymbolReport(SHORTCUTS[text]));
-        } else if (text === "/help"  || text === "/h")  { await sendHelpMessage(); }
-        else if (text.startsWith("/")) {
-          await sendTelegram(`❓ Unknown: <code>${text}</code>\nSend /help for all commands.`);
+        } else if (cmd === "/pause") {
+          await cmdPauseSymbol(cmdArg || "");
+        } else if (cmd === "/resume") {
+          await cmdResumeSymbol(cmdArg || "");
+        } else if (SHORTCUTS[cmd]) {
+          await sendTelegram(buildSymbolReport(SHORTCUTS[cmd]));
+        } else if (cmd === "/help"  || cmd === "/h")  { await sendHelpMessage(); }
+        else if (cmd.startsWith("/")) {
+          await sendTelegram(`❓ Unknown: <code>${cmd}</code>\nSend /help for all commands.`);
         }
       }
     } catch (e) {
