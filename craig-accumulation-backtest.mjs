@@ -19,16 +19,21 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ── Config ────────────────────────────────────────────────────────────────────
-const SYMBOLS         = ["BTC-USD"];  // BTC uses 15m exec / 1h regime
+const SYMBOLS         = ["BTC-USD", "AKT-USD"];  // 15m exec / 1h regime (AKT moved from 5m/30m)
 const INITIAL_CAPITAL = 500;
 
 const EMA_FAST_LARGE  = 50;       // applied to 1h candles
 const EMA_SLOW_LARGE  = 200;      // applied to 1h candles
 const SWING_LB        = 5;
 
-// Split ladders matching the live bot: first SELL slot raised 8→15 to take profit faster
-const BOS_SCALE_PCT_BUY  = [8, 12, 18, 27];   // buy scale-in
-const BOS_SCALE_PCT_SELL = [15, 18, 27, 27];  // sell scale-out (larger first exit)
+// Global ladders — per-symbol overrides in SELL_LADDER_OVERRIDE take precedence
+const BOS_SCALE_PCT_BUY  = [8, 12, 18, 27];   // buy scale-in (all symbols)
+const BOS_SCALE_PCT_SELL = [15, 18, 27, 27];  // sell scale-out default
+
+// Per-symbol sell ladder overrides (mirrors live SYMBOL_CONFIG.sellLadder)
+const SELL_LADDER_OVERRIDE = {
+  "BTC-USD": [10, 15, 22, 27],  // softer first exit — backtest showed 15% hurts in bull runs
+};
 const REQUIRE_BOS_BEFORE_CHOCH = true;
 
 // NEW: CHOCH continues the scale ladder instead of going all-in.
@@ -153,7 +158,7 @@ function build1hRegime(candles1h) {
 }
 
 // ── Simulation ────────────────────────────────────────────────────────────────
-function simulate(candles15m, candles1h) {
+function simulate(candles15m, candles1h, sellLadder = BOS_SCALE_PCT_SELL) {
   const { crossMap, stateMap } = build1hRegime(candles1h);
 
   let structure = 0;
@@ -289,8 +294,8 @@ function simulate(candles15m, candles1h) {
 
     if (regime === "sell") {
       // BOS: scaled sell on bullish break of structure
-      if (bullBOS && bosCount < BOS_SCALE_PCT_SELL.length && btcQty > 0) {
-        const allocPct = BOS_SCALE_PCT_SELL[bosCount];
+      if (bullBOS && bosCount < sellLadder.length && btcQty > 0) {
+        const allocPct = sellLadder[bosCount];
         const sellQty  = (regimeStartBtcQty * allocPct) / 100;
         const actual   = Math.min(sellQty, btcQty);
         if (actual > 1e-8) {
@@ -307,8 +312,8 @@ function simulate(candles15m, candles1h) {
         if (CHOCH_CONTINUE_SCALE) {
           // ── NEW: CHOCH continues the BOS scale ladder, not all-out ─────────
           let sellQty;
-          if (bosCount < BOS_SCALE_PCT_SELL.length) {
-            const allocPct = BOS_SCALE_PCT_SELL[bosCount];
+          if (bosCount < sellLadder.length) {
+            const allocPct = sellLadder[bosCount];
             sellQty = (regimeStartBtcQty * allocPct) / 100;
           } else {
             sellQty = btcQty; // overflow: all remaining
@@ -480,7 +485,8 @@ async function main() {
         continue;
       }
 
-      const r = simulate(candles15m, candles1h);
+      const symSellLadder = SELL_LADDER_OVERRIDE[symbol] ?? BOS_SCALE_PCT_SELL;
+      const r = simulate(candles15m, candles1h, symSellLadder);
       printScenarioResult(`${symbol} — ${sc.label}`, r);
       results.push({ label: sc.label, r });
     }

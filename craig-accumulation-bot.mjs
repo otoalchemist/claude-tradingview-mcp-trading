@@ -29,6 +29,16 @@ import { readFileSync, writeFileSync, renameSync, existsSync, appendFileSync, un
          mkdirSync, copyFileSync } from "fs";
 import crypto from "crypto";
 
+// ── Persistent state directory ────────────────────────────────────────────────
+// Locally defaults to "." (working directory).
+// On Railway set STATE_DIR=/app/data and mount a persistent Volume at /app/data
+// so state files survive redeploys.
+// SEED_DIR holds the one-time bootstrap copies committed to git; they are copied
+// to STATE_DIR on first run if STATE_DIR doesn't already have them.
+const STATE_DIR  = (process.env.STATE_DIR ?? ".").replace(/\/+$/, "");
+const SEED_DIR   = path.join(path.dirname(new URL(import.meta.url).pathname), "data");
+const TRADES_LOG        = path.join(STATE_DIR, "craig-accum-trades.jsonl");
+
 // ── Instance identity + duplicate detection ───────────────────────────────────
 // Each process start gets a unique 4-byte hex ID so two running instances
 // can be told apart immediately in Telegram messages and /ping output.
@@ -77,15 +87,6 @@ const SCAN_INTERVAL_MS     = 5 * 60 * 1000;   // scan every 5 min
 const CB_MAX               = 350;
 const WARMUP               = SWING_LB * 2 + 2;
 
-// ── Persistent state directory ────────────────────────────────────────────────
-// Locally defaults to "." (working directory).
-// On Railway set STATE_DIR=/app/data and mount a persistent Volume at /app/data
-// so state files survive redeploys.
-// SEED_DIR holds the one-time bootstrap copies committed to git; they are copied
-// to STATE_DIR on first run if STATE_DIR doesn't already have them.
-const STATE_DIR  = (process.env.STATE_DIR ?? ".").replace(/\/+$/, "");
-const SEED_DIR   = path.join(path.dirname(new URL(import.meta.url).pathname), "data");
-const TRADES_LOG        = path.join(STATE_DIR, "craig-accum-trades.jsonl");
 const MAX_TRADES_IN_STATE  = 500;              // cap trades[] in state file to prevent unbounded growth
 const MIN_ORDER_USD        = 1.00;             // minimum buy size (raise to exchange minimum before live)
 const MIN_ORDER_QTY        = 1e-8;             // minimum sell qty (dust threshold)
