@@ -959,13 +959,22 @@ function buildSymbolReport(symbol) {
     const deployedPct = (s.cryptoQty * price) / (portVal || 1) * 100;
     deployLine = `\nDeployed: ${deployedPct.toFixed(0)}% in crypto  │  Signals: ${s.bosCount}`;
   } else if (s.regime === "sell") {
-    // If cryptoQty is effectively zero → fully distributed regardless of baseline
-    const soldPct = s.cryptoQty <= MIN_ORDER_QTY
-      ? 100
-      : s.regimeStartCryptoQty > 0
-        ? (1 - s.cryptoQty / s.regimeStartCryptoQty) * 100
-        : 0;  // baseline unknown — show 0 rather than mislead
-    deployLine = `\nDistributed: ${soldPct.toFixed(0)}% of crypto  │  Signals: ${s.bosCount}`;
+    // regimeStartCryptoQty > 0 means we had a real position at regime start
+    //   cryptoQty ≈ 0 → 100% distributed
+    //   cryptoQty > 0 → partial — compute from baseline
+    // regimeStartCryptoQty = 0 means no position was ever bought (never entered buy regime)
+    //   → show "no position" rather than a misleading %
+    let soldPct, noPos = false;
+    if (s.regimeStartCryptoQty > 0) {
+      soldPct = s.cryptoQty <= MIN_ORDER_QTY
+        ? 100
+        : (1 - s.cryptoQty / s.regimeStartCryptoQty) * 100;
+    } else {
+      soldPct = 0; noPos = true;
+    }
+    deployLine = noPos
+      ? `\nNo crypto position  │  Signals: ${s.bosCount}`
+      : `\nDistributed: ${soldPct.toFixed(0)}% of crypto  │  Signals: ${s.bosCount}`;
   }
 
   // Today's trades
@@ -1171,11 +1180,11 @@ async function sendRegimeOverview() {
         const pct = val > 0 ? (dep / val * 100).toFixed(0) : 0;
         detail = `dep:${pct}% sig:${s.bosCount}`;
       } else if (s.regime === "sell") {
-        const sp = s.cryptoQty <= MIN_ORDER_QTY
-          ? "100"
-          : s.regimeStartCryptoQty > 0
-            ? ((1 - s.cryptoQty / s.regimeStartCryptoQty) * 100).toFixed(0)
-            : "—";
+        const sp = s.regimeStartCryptoQty > 0
+          ? (s.cryptoQty <= MIN_ORDER_QTY
+              ? "100"
+              : ((1 - s.cryptoQty / s.regimeStartCryptoQty) * 100).toFixed(0))
+          : "—";   // no position ever held in this sell regime
         detail = `sold:${sp}% sig:${s.bosCount}`;
       }
       const pauseTag = s.tradingPaused ? " ⏸" : "";
