@@ -79,8 +79,8 @@ const INITIAL_CAPITAL      = 100;
 const EMA_FAST             = 50;
 const EMA_SLOW             = 200;
 const SWING_LB             = 5;
-const BOS_SCALE_PCT_BUY    = [25, 25, 25, 25];  // scale-in: flat ladder — sweep rank #1/70 (+6.00% avg edge)
-const BOS_SCALE_PCT_SELL   = [8, 12, 20, 30];   // scale-out: backload-steep — sweep rank #1/70 (+6.04% avg edge)
+const BOS_SCALE_PCT_BUY    = [15, 15, 15, 15];  // scale-in:  flat-15  — sweep optimal for BTC/ETH/SOL
+const BOS_SCALE_PCT_SELL   = [5, 10, 20, 40];   // scale-out: back-steep — sweep optimal for BTC/ETH/SOL
 const REQUIRE_BOS_BEFORE_CHOCH = true;
 const CHOCH_CONTINUE_SCALE     = true;
 const SCAN_INTERVAL_MS     = 5 * 60 * 1000;   // scan every 5 min
@@ -96,14 +96,23 @@ const MIN_ORDER_QTY        = 1e-8;             // minimum sell qty (dust thresho
 // When false (default), all trades are simulated at bar-close price — paper mode.
 const LIVE_TRADING = process.env.LIVE_TRADING === "true";
 
-// Coinbase base-size decimal precision per symbol (for sell orders)
-// Coinbase rejects orders with more decimal places than the product allows
+// Coinbase order precision per symbol — overwritten at startup from live product info.
+// base_size (SELL): how many decimal places the crypto quantity may have.
+// quote_size (BUY): how many decimal places the USD amount may have.
+// Conservative defaults; fetchProductPrecisions() replaces these with real values.
 const BASE_SIZE_DECIMALS = {
   "BTC-USD":  8,
   "ETH-USD":  8,
-  "SOL-USD":  6,
-  "LINK-USD": 4,
-  "PEPE-USD": 0,   // integer PEPE only
+  "SOL-USD":  3,   // Coinbase SOL base_increment = 0.001
+  "LINK-USD": 2,   // Coinbase LINK base_increment = 0.01
+  "PEPE-USD": 0,   // integer PEPE only (base_increment = 1)
+};
+const QUOTE_SIZE_DECIMALS = {
+  "BTC-USD":  2,
+  "ETH-USD":  2,
+  "SOL-USD":  2,
+  "LINK-USD": 2,
+  "PEPE-USD": 2,
 };
 
 // Per-symbol execution / regime config
@@ -125,12 +134,14 @@ const SYMBOL_CONFIG = {
   "LINK-USD": {
     exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
     regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 600, ms: THIRTY_MIN_MS,  label: "30m" },
+    sellLadder: [33, 33, 33, 33],  // flat-33 — LINK oscillates; uniform distribution beats backloaded
   },
   "PEPE-USD": {
     exec:   { gran: "FIVE_MINUTE", secs:  300, bars: 300, label: "5m"  },
     regime: { gran: "ONE_HOUR",    secs: 3600, bars: 1000, ms: FOUR_HOUR_MS, label: "4h",
               aggFrom: HOUR_MS },  // fetch 1h bars, aggregate 4:1 → synthetic 4h regime
-    buyLadder: [35, 25, 15, 10],  // frontload-steep — backtest sweep rank #1 for PEPE (+13.23% avg edge)
+    buyLadder:  [33, 33, 33, 33],  // flat-33 — uniform accumulation
+    sellLadder: [30, 25, 20, 10],  // front-steep — PEPE spikes front-loaded; take profits early
   },
 };
 
@@ -269,10 +280,46 @@ async function cbFetch(method, path, body = null) {
   }
 }
 
+// Derive decimal places from a Coinbase increment string e.g. "0.001" → 3, "1" → 0
+function incrementDecimals(inc) {
+  const n = parseFloat(inc);
+  if (!n || n >= 1) return 0;
+  return Math.ceil(-Math.log10(n));
+}
+
 function formatBaseSize(symbol, qty) {
   const dec = BASE_SIZE_DECIMALS[symbol] ?? 6;
   if (dec === 0) return String(Math.floor(qty));
   return qty.toFixed(dec);
+}
+
+function formatQuoteSize(symbol, usd) {
+  const dec = QUOTE_SIZE_DECIMALS[symbol] ?? 2;
+  return usd.toFixed(dec);
+}
+
+// Fetch actual base_increment / quote_increment from Coinbase and update precision maps.
+// Runs once at startup when LIVE_TRADING=true to ensure we never send too many decimals.
+async function fetchProductPrecisions() {
+  if (!LIVE_TRADING) return;
+  console.log("[Precision] Fetching product increments from Coinbase...");
+  for (const sym of SYMBOLS) {
+    try {
+      const data = await cbFetch("GET", `/api/v3/brokerage/products/${sym}`);
+      if (data.base_increment) {
+        const dec = incrementDecimals(data.base_increment);
+        BASE_SIZE_DECIMALS[sym] = dec;
+      }
+      if (data.quote_increment) {
+        const dec = incrementDecimals(data.quote_increment);
+        QUOTE_SIZE_DECIMALS[sym] = dec;
+      }
+      console.log(`[Precision] ${sym}  base=${data.base_increment}(${BASE_SIZE_DECIMALS[sym]}dp)  quote=${data.quote_increment}(${QUOTE_SIZE_DECIMALS[sym]}dp)`);
+    } catch (e) {
+      console.warn(`[Precision] ${sym} fetch failed: ${e.message} — using defaults`);
+    }
+    await new Promise(r => setTimeout(r, 250));
+  }
 }
 
 async function placeLiveOrder(symbol, side, size) {
@@ -280,7 +327,7 @@ async function placeLiveOrder(symbol, side, size) {
   // SELL: size = crypto qty  → base_size  (market sell)
   const clientOrderId = `craig-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
   const orderCfg = side === "BUY"
-    ? { market_market_ioc: { quote_size: size.toFixed(2) } }
+    ? { market_market_ioc: { quote_size: formatQuoteSize(symbol, size) } }
     : { market_market_ioc: { base_size:  formatBaseSize(symbol, size) } };
 
   const result = await cbFetch("POST", "/api/v3/brokerage/orders", {
@@ -1078,8 +1125,8 @@ async function sendPing() {
     `Symbols   : ${SYMBOLS.length}  [${SYMBOLS.map(s => s.replace("-USD","")).join(" · ")}]\n` +
     `Capital   : $${INITIAL_CAPITAL}/sym  ($${SYMBOLS.length * INITIAL_CAPITAL} total)\n` +
     `Regimes   : BTC=1h  ETH/SOL/LINK=30m  PEPE=4h (agg from 1h)\n` +
-    `Buy scale : [${BOS_SCALE_PCT_BUY.join(", ")}]%  UNLIMITED  (PEPE: [35,25,15,10]%)\n` +
-    `Sell scale: [${BOS_SCALE_PCT_SELL.join(", ")}]%  UNLIMITED\n` +
+    `Buy scale : BTC/ETH/SOL=[${BOS_SCALE_PCT_BUY.join(",")}]%  LINK=[${BOS_SCALE_PCT_BUY.join(",")}]%  PEPE=[33,33,33,33]%\n` +
+    `Sell scale: BTC/ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[33,33,33,33]%  PEPE=[30,25,20,10]%\n` +
     `Instance  : <code>${BOT_INSTANCE_ID}</code>  ← if you see two IDs, a duplicate is running`
   );
 }
@@ -1257,8 +1304,8 @@ async function sendHelpMessage() {
     `BTC: 1h regime / 15m exec\n` +
     `ETH · SOL · LINK: 30m regime / 5m exec\n` +
     `PEPE: 4h regime (agg from 1h) / 5m exec\n` +
-    `Buy: [${BOS_SCALE_PCT_BUY.join(", ")}]%  UNLIMITED  (PEPE: [35,25,15,10]%)\n` +
-    `Sell: [${BOS_SCALE_PCT_SELL.join(", ")}]%  UNLIMITED\n\n` +
+    `Buy:  BTC/ETH/SOL=[${BOS_SCALE_PCT_BUY.join(",")}]%  LINK=[${BOS_SCALE_PCT_BUY.join(",")}]%  PEPE=[33,33,33,33]%\n` +
+    `Sell: BTC/ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[33,33,33,33]%  PEPE=[30,25,20,10]%\n\n` +
     `⏰ Auto-reports: 00/06/12/18 UTC  +  EOD 23:55 UTC`
   );
 }
@@ -1541,6 +1588,9 @@ async function main() {
   const modeLabel    = LIVE_TRADING ? "🔴 LIVE TRADING"  : "📝 PAPER TRADING";
   const modeLabelTg  = LIVE_TRADING ? "🔴 <b>LIVE TRADING</b>" : "📝 PAPER TRADING";
 
+  // Fetch live product precision from Coinbase (fixes "too many decimals" order rejections)
+  await fetchProductPrecisions();
+
   // Overwrite stale BotFather command menu (old E2 bot registered E2-specific commands)
   await registerBotCommands();
 
@@ -1566,8 +1616,8 @@ async function main() {
     `BTC: 1h regime / 15m exec\n` +
     `ETH · SOL · LINK: 30m regime / 5m exec\n` +
     `PEPE: 4h regime (agg from 1h) / 5m exec\n` +
-    `Buy:  [${BOS_SCALE_PCT_BUY.join(", ")}]%  UNLIMITED  (PEPE: [35,25,15,10]%)\n` +
-    `Sell: [${BOS_SCALE_PCT_SELL.join(", ")}]%  UNLIMITED\n` +
+    `Buy:  BTC/ETH/SOL=[${BOS_SCALE_PCT_BUY.join(",")}]%  LINK=[${BOS_SCALE_PCT_BUY.join(",")}]%  PEPE=[33,33,33,33]%\n` +
+    `Sell: BTC/ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[33,33,33,33]%  PEPE=[30,25,20,10]%\n` +
     `Reports: every 6h + EOD at 23:55 UTC\n` +
     `Commands: /ping /price /status /report /trades /hist /scan\n` +
     `Per symbol: /btc /eth /sol /link /pepe  |  /help for full list\n` +
