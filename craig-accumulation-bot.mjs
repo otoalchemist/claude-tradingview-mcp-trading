@@ -252,9 +252,17 @@ async function cbFetch(method, path, body = null) {
   };
   if (body) opts.body = JSON.stringify(body);
   const res  = await fetch(`https://api.coinbase.com${path}`, opts);
-  const json = await res.json();
-  if (!res.ok) throw new Error(`CB ${res.status} ${method} ${path}: ${JSON.stringify(json).slice(0, 200)}`);
-  return json;
+  const text = await res.text();
+  if (!res.ok) {
+    console.error(`[CB] HTTP ${res.status} ${method} ${path} — body: ${text.slice(0, 400)}`);
+    throw new Error(`CB ${res.status} ${method} ${path}: ${text.slice(0, 200)}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    console.error(`[CB] Non-JSON OK response ${method} ${path}: ${text.slice(0, 200)}`);
+    throw e;
+  }
 }
 
 function formatBaseSize(symbol, qty) {
@@ -1417,6 +1425,19 @@ async function main() {
       process.exit(1);
     }
     console.log("🔴 LIVE_TRADING=true — real orders will be placed on Coinbase");
+    // Quick auth check — logs HTTP status + raw body so we can diagnose 401s
+    (async () => {
+      try {
+        const testRes = await fetch("https://api.coinbase.com/api/v3/brokerage/accounts?limit=1", {
+          headers: { "Authorization": `Bearer ${buildJWT("GET", "/api/v3/brokerage/accounts?limit=1")}` },
+          signal: AbortSignal.timeout(10_000),
+        });
+        const testBody = await testRes.text();
+        console.log(`[CB Auth check] HTTP ${testRes.status} — body[:200]: ${testBody.slice(0, 200)}`);
+      } catch (e) {
+        console.error(`[CB Auth check] request failed: ${e.message}`);
+      }
+    })();
   }
 
   const modeLabel    = LIVE_TRADING ? "🔴 LIVE TRADING"  : "📝 PAPER TRADING";
