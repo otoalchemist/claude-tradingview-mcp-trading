@@ -11,9 +11,10 @@
 //
 //   Death cross  → BUY  regime: scale-in  on each bearish BOS / bullish CHOCH
 //   Golden cross → SELL regime: scale-out on each bullish BOS / bearish CHOCH
-//   Buy  ladder  : [25, 25, 25, 25]% of regime-start capital — UNLIMITED slots  (flat: sweep rank #1/70)
-//                  PEPE override: [35, 25, 15, 10]% — frontload-steep (sweep rank #1 for PEPE)
-//   Sell ladder  : [8, 12, 20, 30]% of regime-start crypto  — UNLIMITED slots  (backload-steep: sweep rank #1/70)
+//   Buy  ladder  : BTC/ETH/SOL [15,15,15,15]%  LINK [15,15,15,15]%  PEPE [33,33,33,33]%
+//                  % of regime-start capital per BOS signal — UNLIMITED slots (slot 4+ repeats last)
+//   Sell ladder  : BTC/ETH/SOL [5,10,20,40]%   LINK [33,33,33,33]%  PEPE [30,25,20,10]%
+//                  % of regime-start crypto qty per BOS signal — UNLIMITED slots
 //   CHOCH        : continues scale (same per-slot %; no all-in)
 //
 // REPORTS  : 6-hour check-in (00, 06, 12, 18 UTC) + EOD at 23:55 UTC via Telegram
@@ -237,6 +238,7 @@ function fPrice(n) {
   return "$" + n.toFixed(8);
 }
 function fQty(n) {
+  if (n == null || isNaN(n)) return "0";
   if (Math.abs(n) >= 1000) return n.toFixed(2);
   if (Math.abs(n) >= 1)    return n.toFixed(4);
   return n.toFixed(8);
@@ -547,6 +549,7 @@ function loadState(symbol) {
     if (!("regimeStartPrice"     in state)) state.regimeStartPrice     = 0;
     if (!("regimeStartCryptoQty" in state)) state.regimeStartCryptoQty = 0;
     if (!("tradingPaused"        in state)) state.tradingPaused        = false;
+    if (!("regimeCount"          in state)) state.regimeCount          = { buy: 0, sell: 0 };
     return state;
   } catch {
     return makeFreshState(symbol);
@@ -641,8 +644,8 @@ async function processSymbol(symbol) {
     ? aggregateCandles(candlesRegime, cfg.regime.ms)
     : candlesRegime;
 
-  if (cfg.regime.aggFrom && regimeBarsForBuild.length < 210) {
-    console.log(`[${symbol}] Insufficient aggregated regime bars (${regimeBarsForBuild.length} after ${cfg.regime.label} agg) — skipping`);
+  if (cfg.regime.aggFrom && regimeBarsForBuild.length < 220) {
+    console.log(`[${symbol}] Insufficient aggregated regime bars (${regimeBarsForBuild.length} after ${cfg.regime.label} agg, need 220) — skipping`);
     return;
   }
 
@@ -767,6 +770,8 @@ async function processSymbol(symbol) {
         state.regimeStartCapital = state.cash + state.cryptoQty * bar.c;
         state.regimeStartPrice   = bar.c;
         state.regimeCount.buy++;
+        // Reset structure tracking so stale pivots from the old regime don't fire false signals
+        state.structure = 0; state.lastSH = null; state.lastSL = null;
         const msg = `☠️ <b>${symbol}</b> DEATH CROSS → BUY REGIME\n@ ${fP(bar.c)} | Capital: $${f2(state.regimeStartCapital)}`;
         console.log(`[${symbol}] DEATH CROSS → BUY @ ${fP(bar.c)} | capital $${f2(state.regimeStartCapital)}`);
         alerts.push(msg);
@@ -777,6 +782,8 @@ async function processSymbol(symbol) {
         state.regimeStartCryptoQty  = state.cryptoQty;
         state.regimeStartPrice      = bar.c;
         state.regimeCount.sell++;
+        // Reset structure tracking so stale pivots from the old regime don't fire false signals
+        state.structure = 0; state.lastSH = null; state.lastSL = null;
         const msg = `⭐ <b>${symbol}</b> GOLDEN CROSS → SELL REGIME\n@ ${fP(bar.c)} | Crypto: ${fQ(state.regimeStartCryptoQty)}`;
         console.log(`[${symbol}] GOLDEN CROSS → SELL @ ${fP(bar.c)} | qty ${fQ(state.regimeStartCryptoQty)}`);
         alerts.push(msg);
@@ -1138,8 +1145,8 @@ async function sendPing() {
     `Symbols   : ${SYMBOLS.length}  [${SYMBOLS.map(s => s.replace("-USD","")).join(" · ")}]\n` +
     `Capital   : $${INITIAL_CAPITAL}/sym  ($${SYMBOLS.length * INITIAL_CAPITAL} total)\n` +
     `Regimes   : BTC=1h  ETH/SOL/LINK=30m  PEPE=4h (agg from 1h)\n` +
-    `Buy scale : BTC/ETH/SOL=[${BOS_SCALE_PCT_BUY.join(",")}]%  LINK=[${BOS_SCALE_PCT_BUY.join(",")}]%  PEPE=[33,33,33,33]%\n` +
-    `Sell scale: BTC/ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[33,33,33,33]%  PEPE=[30,25,20,10]%\n` +
+    `Buy scale : BTC/ETH/SOL=[${BOS_SCALE_PCT_BUY.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
+    `Sell scale: BTC/ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%\n` +
     `Instance  : <code>${BOT_INSTANCE_ID}</code>  ← if you see two IDs, a duplicate is running`
   );
 }
@@ -1298,7 +1305,7 @@ async function sendHelpMessage() {
   await sendTelegram(
     `🤖 <b>Craig Accum Bot v2 — Commands</b>\n\n` +
     `<b>Status &amp; Prices</b>\n` +
-    `/ping   — Health: uptime, last scan, next scan\n` +
+    `/ping          — Health: uptime, last scan, next scan\n` +
     `/price  — Live prices + regime for all symbols\n` +
     `/status — Regime overview + P&amp;L per symbol\n` +
     `/report — Full portfolio report (all symbols)\n\n` +
@@ -1320,8 +1327,8 @@ async function sendHelpMessage() {
     `BTC: 1h regime / 15m exec\n` +
     `ETH · SOL · LINK: 30m regime / 5m exec\n` +
     `PEPE: 4h regime (agg from 1h) / 5m exec\n` +
-    `Buy:  BTC/ETH/SOL=[${BOS_SCALE_PCT_BUY.join(",")}]%  LINK=[${BOS_SCALE_PCT_BUY.join(",")}]%  PEPE=[33,33,33,33]%\n` +
-    `Sell: BTC/ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[33,33,33,33]%  PEPE=[30,25,20,10]%\n\n` +
+    `Buy:  BTC/ETH/SOL=[${BOS_SCALE_PCT_BUY.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
+    `Sell: BTC/ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%\n\n` +
     `⏰ Auto-reports: 00/06/12/18 UTC  +  EOD 23:55 UTC`
   );
 }
@@ -1632,8 +1639,8 @@ async function main() {
     `BTC: 1h regime / 15m exec\n` +
     `ETH · SOL · LINK: 30m regime / 5m exec\n` +
     `PEPE: 4h regime (agg from 1h) / 5m exec\n` +
-    `Buy:  BTC/ETH/SOL=[${BOS_SCALE_PCT_BUY.join(",")}]%  LINK=[${BOS_SCALE_PCT_BUY.join(",")}]%  PEPE=[33,33,33,33]%\n` +
-    `Sell: BTC/ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[33,33,33,33]%  PEPE=[30,25,20,10]%\n` +
+    `Buy:  BTC/ETH/SOL=[${BOS_SCALE_PCT_BUY.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
+    `Sell: BTC/ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%\n` +
     `Reports: every 6h + EOD at 23:55 UTC\n` +
     `Commands: /ping /price /status /report /trades /hist /scan\n` +
     `Per symbol: /btc /eth /sol /link /pepe  |  /help for full list\n` +
