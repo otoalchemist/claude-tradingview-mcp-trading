@@ -1425,7 +1425,20 @@ async function main() {
       process.exit(1);
     }
     console.log("🔴 LIVE_TRADING=true — real orders will be placed on Coinbase");
-    // Quick auth check — logs HTTP status + raw body so we can diagnose 401s
+    // ── Private key diagnostic ──────────────────────────────────────────────────
+    try {
+      const rawKey = (process.env.COINBASE_PRIVATE_KEY ?? "").replace(/\\n/g, "\n");
+      const lines  = rawKey.split("\n");
+      console.log(`[CB Key diag] raw length=${rawKey.length} lines=${lines.length}`);
+      console.log(`[CB Key diag] first line: "${lines[0]}"`);
+      console.log(`[CB Key diag] last line:  "${lines[lines.length - 1]}"`);
+      const keyObj = crypto.createPrivateKey(rawKey);
+      const { asymmetricKeyType, asymmetricKeyDetails } = keyObj;
+      console.log(`[CB Key diag] parsed OK — type=${asymmetricKeyType} namedCurve=${asymmetricKeyDetails?.namedCurve}`);
+    } catch (e) {
+      console.error(`[CB Key diag] key parse FAILED: ${e.message}`);
+    }
+    // ── Quick auth check — logs HTTP status + raw body so we can diagnose 401s ─
     (async () => {
       try {
         const testRes = await fetch("https://api.coinbase.com/api/v3/brokerage/accounts?limit=1", {
