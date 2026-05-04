@@ -11,9 +11,8 @@
 //
 //   Death cross  → BUY  regime: scale-in  on each bearish BOS / bullish CHOCH
 //   Golden cross → SELL regime: scale-out on each bullish BOS / bearish CHOCH
-//   Buy  ladder  : [8, 12, 18, 27]% of regime-start capital — UNLIMITED slots
-//   Sell ladder  : [15, 18, 27, 27]% of regime-start crypto  — UNLIMITED slots
-//                  BTC override: [10, 15, 22, 27]% — softer first exit for strong bull runs
+//   Buy  ladder  : [25, 25, 25, 25]% of regime-start capital — UNLIMITED slots  (flat: sweep rank #1/70)
+//   Sell ladder  : [8, 12, 20, 30]% of regime-start crypto  — UNLIMITED slots  (backload-steep: sweep rank #1/70)
 //   CHOCH        : continues scale (same per-slot %; no all-in)
 //
 // REPORTS  : 6-hour check-in (00, 06, 12, 18 UTC) + EOD at 23:55 UTC via Telegram
@@ -78,8 +77,8 @@ const INITIAL_CAPITAL      = 100;
 const EMA_FAST             = 50;
 const EMA_SLOW             = 200;
 const SWING_LB             = 5;
-const BOS_SCALE_PCT_BUY    = [8, 12, 18, 27];   // scale-in: conservative entry
-const BOS_SCALE_PCT_SELL   = [15, 18, 27, 27];  // scale-out: larger first exit
+const BOS_SCALE_PCT_BUY    = [25, 25, 25, 25];  // scale-in: flat ladder — sweep rank #1/70 (+6.00% avg edge)
+const BOS_SCALE_PCT_SELL   = [8, 12, 20, 30];   // scale-out: backload-steep — sweep rank #1/70 (+6.04% avg edge)
 const REQUIRE_BOS_BEFORE_CHOCH = true;
 const CHOCH_CONTINUE_SCALE     = true;
 const SCAN_INTERVAL_MS     = 5 * 60 * 1000;   // scan every 5 min
@@ -111,7 +110,6 @@ const SYMBOL_CONFIG = {
   "BTC-USD": {
     exec:      { gran: "FIFTEEN_MINUTE", secs:  900, bars: 250, label: "15m" },
     regime:    { gran: "ONE_HOUR",       secs: 3600, bars: 600, ms: HOUR_MS,       label: "1h"  },
-    sellLadder: [10, 15, 22, 27],  // softer first exit — backtest showed early sell hurts in bull runs
   },
   "ETH-USD": {
     exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
@@ -1021,7 +1019,6 @@ async function sendPing() {
     ? Math.ceil(lastScanTime / SCAN_INTERVAL_MS) * SCAN_INTERVAL_MS : null;
   const nextStr = nextMs ? new Date(nextMs).toISOString().slice(11, 16) + " UTC" : "soon";
 
-  const btcSell = SYMBOL_CONFIG["BTC-USD"].sellLadder ?? BOS_SCALE_PCT_SELL;
   await sendTelegram(
     `🏓 <b>Pong — Bot is alive</b>\n\n` +
     `Uptime    : ${uptime}\n` +
@@ -1030,7 +1027,7 @@ async function sendPing() {
     `Symbols   : ${SYMBOLS.length}  [${SYMBOLS.map(s => s.replace("-USD","")).join(" · ")}]\n` +
     `Capital   : $${INITIAL_CAPITAL}/sym  ($${SYMBOLS.length * INITIAL_CAPITAL} total)\n` +
     `Buy scale : [${BOS_SCALE_PCT_BUY.join(", ")}]%  UNLIMITED\n` +
-    `Sell scale: [${BOS_SCALE_PCT_SELL.join(", ")}]%  (BTC: [${btcSell.join(", ")}]%)  UNLIMITED\n` +
+    `Sell scale: [${BOS_SCALE_PCT_SELL.join(", ")}]%  UNLIMITED\n` +
     `Instance  : <code>${BOT_INSTANCE_ID}</code>  ← if you see two IDs, a duplicate is running`
   );
 }
@@ -1207,7 +1204,7 @@ async function sendHelpMessage() {
     `ETH · SOL · LINK: 30m regime / 5m exec\n` +
     `PEPE: 15m regime / 1m exec\n` +
     `Buy: [${BOS_SCALE_PCT_BUY.join(", ")}]%  UNLIMITED\n` +
-    `Sell: [${BOS_SCALE_PCT_SELL.join(", ")}]%  (BTC [10,15,22,27]%)  UNLIMITED\n\n` +
+    `Sell: [${BOS_SCALE_PCT_SELL.join(", ")}]%  UNLIMITED\n\n` +
     `⏰ Auto-reports: 00/06/12/18 UTC  +  EOD 23:55 UTC`
   );
 }
@@ -1439,7 +1436,6 @@ async function main() {
   console.log(`  Capital : $${INITIAL_CAPITAL}/symbol  │  Scan: every 5 min`);
   console.log("═".repeat(66) + "\n");
 
-  const btcSellLadder = (SYMBOL_CONFIG["BTC-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(", ");
   await sendTelegram(
     `🤖 <b>Craig Accumulation Bot v2 — STARTED</b>\n` +
     `Instance: <code>${BOT_INSTANCE_ID}</code>\n\n` +
@@ -1447,7 +1443,7 @@ async function main() {
     `ETH · SOL · LINK: 30m regime / 5m exec\n` +
     `PEPE: 15m regime / 1m exec\n` +
     `Buy:  [${BOS_SCALE_PCT_BUY.join(", ")}]%  UNLIMITED\n` +
-    `Sell: [${BOS_SCALE_PCT_SELL.join(", ")}]%  UNLIMITED  (BTC: [${btcSellLadder}]%)\n` +
+    `Sell: [${BOS_SCALE_PCT_SELL.join(", ")}]%  UNLIMITED\n` +
     `Reports: every 6h + EOD at 23:55 UTC\n` +
     `Commands: /ping /price /status /report /trades /hist /scan\n` +
     `Per symbol: /btc /eth /sol /link /pepe  |  /help for full list\n` +
