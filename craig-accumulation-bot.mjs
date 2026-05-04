@@ -1206,11 +1206,12 @@ async function sendHelpMessage() {
     `/btc /eth /sol /link /pepe — Symbol snapshot\n\n` +
     `<b>Control</b>\n` +
     `/scan          — Trigger immediate scan now\n` +
-    `/pause &lt;sym&gt;  — Pause trading for a symbol (btc, eth, sol…)\n` +
-    `/resume &lt;sym&gt; — Resume trading for a symbol\n` +
-    `/pause all     — Pause ALL symbols\n` +
-    `/resume all    — Resume ALL symbols\n` +
-    `/help          — This message\n\n` +
+    `/pause &lt;sym&gt;        — Pause trading for a symbol (btc, eth, sol…)\n` +
+    `/resume &lt;sym&gt;       — Resume trading for a symbol\n` +
+    `/pause all           — Pause ALL symbols\n` +
+    `/resume all          — Resume ALL symbols\n` +
+    `/setcash &lt;sym&gt; &lt;$&gt; — Manually correct cash balance (e.g. /setcash link 0)\n` +
+    `/help                — This message\n\n` +
     `<b>Strategy</b>\n` +
     `BTC: 1h regime / 15m exec\n` +
     `ETH · SOL · LINK: 30m regime / 5m exec\n` +
@@ -1283,6 +1284,21 @@ async function startTelegramPoller() {
           } else {
             await sendTelegram("🔄 Manual scan triggered...");
             runCycle(true).catch(e => sendTelegram(`❌ Scan error: ${e.message}`));
+          }
+        } else if (cmd === "/setcash") {
+          // /setcash <symbol> <amount>  e.g. /setcash link 0
+          const parts = rawText.trim().split(/\s+/);
+          const symRaw = (parts[1] || "").toUpperCase();
+          const sym = symRaw.includes("-") ? symRaw : `${symRaw}-USD`;
+          const amount = parseFloat(parts[2]);
+          if (!SYMBOL_CONFIG[sym] || isNaN(amount) || amount < 0) {
+            await sendTelegram(`❌ Usage: /setcash &lt;symbol&gt; &lt;amount&gt;\nExample: <code>/setcash LINK 0</code>`);
+          } else {
+            const st = loadState(sym);
+            const old = st.cash.toFixed(2);
+            st.cash = amount;
+            saveState(sym, st);
+            await sendTelegram(`✅ <b>${sym}</b> cash updated: $${old} → $${amount.toFixed(2)}`);
           }
         } else if (cmd === "/pause") {
           await cmdPauseSymbol(cmdArg || "");
