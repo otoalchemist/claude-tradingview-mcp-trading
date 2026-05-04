@@ -8,12 +8,13 @@
 //   SOL-USD  : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
 //   LINK-USD : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
 //   PEPE-USD :  4h EMA50/200 regime  →   5m BOS/CHOCH execution  (4h aggregated from 1h bars)
+//   AKT-USD  : 15m EMA50/200 regime  →   5m BOS/CHOCH execution
 //
 //   Death cross  → BUY  regime: scale-in  on each bearish BOS / bullish CHOCH
 //   Golden cross → SELL regime: scale-out on each bullish BOS / bearish CHOCH
-//   Buy  ladder  : BTC/ETH/SOL [15,15,15,15]%  LINK [15,15,15,15]%  PEPE [33,33,33,33]%
+//   Buy  ladder  : BTC/ETH/SOL [15,15,15,15]%  LINK [15,15,15,15]%  PEPE [33,33,33,33]%  AKT [33,33,33,33]%
 //                  % of regime-start capital per BOS signal — UNLIMITED slots (slot 4+ repeats last)
-//   Sell ladder  : BTC/ETH/SOL [5,10,20,40]%   LINK [33,33,33,33]%  PEPE [30,25,20,10]%
+//   Sell ladder  : BTC/ETH/SOL [5,10,20,40]%   LINK [33,33,33,33]%  PEPE [30,25,20,10]%  AKT [5,10,20,40]%
 //                  % of regime-start crypto qty per BOS signal — UNLIMITED slots
 //   CHOCH        : continues scale (same per-slot %; no all-in)
 //
@@ -75,7 +76,7 @@ const THIRTY_MIN_MS  = 1_800_000;
 const FIFTEEN_MIN_MS =   900_000;
 
 // ── Config ────────────────────────────────────────────────────────────────────
-const SYMBOLS              = ["BTC-USD", "ETH-USD", "SOL-USD", "LINK-USD", "PEPE-USD"];
+const SYMBOLS              = ["BTC-USD", "ETH-USD", "SOL-USD", "LINK-USD", "PEPE-USD", "AKT-USD"];
 const INITIAL_CAPITAL      = 100;
 const EMA_FAST             = 50;
 const EMA_SLOW             = 200;
@@ -107,6 +108,7 @@ const BASE_SIZE_DECIMALS = {
   "SOL-USD":  3,   // Coinbase SOL base_increment = 0.001
   "LINK-USD": 2,   // Coinbase LINK base_increment = 0.01
   "PEPE-USD": 0,   // integer PEPE only (base_increment = 1)
+  "AKT-USD":  2,   // conservative default; overwritten at startup by fetchProductPrecisions
 };
 const QUOTE_SIZE_DECIMALS = {
   "BTC-USD":  2,
@@ -114,6 +116,7 @@ const QUOTE_SIZE_DECIMALS = {
   "SOL-USD":  2,
   "LINK-USD": 2,
   "PEPE-USD": 2,
+  "AKT-USD":  2,
 };
 
 // Per-symbol execution / regime config
@@ -143,6 +146,12 @@ const SYMBOL_CONFIG = {
               aggFrom: HOUR_MS },  // fetch 1h bars, aggregate 4:1 → synthetic 4h regime
     buyLadder:  [33, 33, 33, 33],  // flat-33 — uniform accumulation
     sellLadder: [30, 25, 20, 10],  // front-steep — PEPE spikes front-loaded; take profits early
+  },
+  "AKT-USD": {
+    exec:   { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
+    regime: { gran: "FIFTEEN_MINUTE", secs:  900, bars: 600, ms: FIFTEEN_MIN_MS, label: "15m" },
+    buyLadder:  [33, 33, 33, 33],  // flat-33 — conservative uniform accumulation
+    sellLadder: [ 5, 10, 20, 40],  // back-steep — hold for bigger rallies
   },
 };
 
@@ -761,7 +770,7 @@ async function processSymbol(symbol) {
     }
 
     // ── 3. Regime change check ────────────────────────────────────────────────
-    // Checked at each regime-candle boundary (every 1h for BTC; every 30m for ETH/SOL/LINK; every 4h for PEPE)
+    // Checked at each regime-candle boundary (every 1h for BTC; every 30m for ETH/SOL/LINK; every 4h for PEPE; every 15m for AKT)
     if (bar.t % cfg.regime.ms === 0) {
       const cross = crossMap.get(bar.t);
       if (cross === "death" && state.regime !== "buy") {
@@ -1144,9 +1153,9 @@ async function sendPing() {
     `Next scan : ~${nextStr}\n` +
     `Symbols   : ${SYMBOLS.length}  [${SYMBOLS.map(s => s.replace("-USD","")).join(" · ")}]\n` +
     `Capital   : $${INITIAL_CAPITAL}/sym  ($${SYMBOLS.length * INITIAL_CAPITAL} total)\n` +
-    `Regimes   : BTC=1h  ETH/SOL/LINK=30m  PEPE=4h (agg from 1h)\n` +
-    `Buy scale : BTC/ETH/SOL=[${BOS_SCALE_PCT_BUY.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
-    `Sell scale: BTC/ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%\n` +
+    `Regimes   : BTC=1h  ETH/SOL/LINK=30m  PEPE=4h (agg from 1h)  AKT=15m\n` +
+    `Buy scale : BTC/ETH/SOL=[${BOS_SCALE_PCT_BUY.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
+    `Sell scale: BTC/ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%\n` +
     `Instance  : <code>${BOT_INSTANCE_ID}</code>  ← if you see two IDs, a duplicate is running`
   );
 }
@@ -1313,7 +1322,7 @@ async function sendHelpMessage() {
     `/trades — Today's trades by symbol\n` +
     `/hist   — Last 20 trades across all symbols\n\n` +
     `<b>Per Symbol</b>\n` +
-    `/btc /eth /sol /link /pepe — Symbol snapshot\n\n` +
+    `/btc /eth /sol /link /pepe /akt — Symbol snapshot\n\n` +
     `<b>Control</b>\n` +
     `/scan          — Trigger immediate scan now\n` +
     `/pause &lt;sym&gt;        — Pause trading for a symbol (btc, eth, sol…)\n` +
@@ -1327,8 +1336,9 @@ async function sendHelpMessage() {
     `BTC: 1h regime / 15m exec\n` +
     `ETH · SOL · LINK: 30m regime / 5m exec\n` +
     `PEPE: 4h regime (agg from 1h) / 5m exec\n` +
-    `Buy:  BTC/ETH/SOL=[${BOS_SCALE_PCT_BUY.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
-    `Sell: BTC/ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%\n\n` +
+    `AKT: 15m regime / 5m exec\n` +
+    `Buy:  BTC/ETH/SOL=[${BOS_SCALE_PCT_BUY.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
+    `Sell: BTC/ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%\n\n` +
     `⏰ Auto-reports: 00/06/12/18 UTC  +  EOD 23:55 UTC`
   );
 }
@@ -1378,7 +1388,7 @@ async function startTelegramPoller() {
         console.log(`[Telegram] Command received: "${text}"`);
 
         // Per-symbol shortcuts
-        const SHORTCUTS = { "/btc":"BTC-USD", "/eth":"ETH-USD", "/sol":"SOL-USD", "/link":"LINK-USD", "/pepe":"PEPE-USD" };
+        const SHORTCUTS = { "/btc":"BTC-USD", "/eth":"ETH-USD", "/sol":"SOL-USD", "/link":"LINK-USD", "/pepe":"PEPE-USD", "/akt":"AKT-USD" };
 
         // Parse optional argument for /pause and /resume: "/pause btc" → arg="btc"
         const [cmd, cmdArg] = text.split(/\s+/, 2);
@@ -1629,7 +1639,7 @@ async function main() {
   }
   console.log(`  Buy (default) : [${BOS_SCALE_PCT_BUY.join(", ")}]%  │  Sell (default): [${BOS_SCALE_PCT_SELL.join(", ")}]%  │  UNLIMITED slots`);
   console.log(`  Reports : 6h check-in (00/06/12/18 UTC)  +  EOD at 23:55 UTC`);
-  console.log(`  Commands: /ping /price /status /report /trades /hist /scan /btc /eth /sol /link /pepe /help`);
+  console.log(`  Commands: /ping /price /status /report /trades /hist /scan /btc /eth /sol /link /pepe /akt /help`);
   console.log(`  Capital : $${INITIAL_CAPITAL}/symbol  │  Scan: every 5 min`);
   console.log("═".repeat(66) + "\n");
 
@@ -1639,11 +1649,12 @@ async function main() {
     `BTC: 1h regime / 15m exec\n` +
     `ETH · SOL · LINK: 30m regime / 5m exec\n` +
     `PEPE: 4h regime (agg from 1h) / 5m exec\n` +
-    `Buy:  BTC/ETH/SOL=[${BOS_SCALE_PCT_BUY.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
-    `Sell: BTC/ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%\n` +
+    `AKT: 15m regime / 5m exec\n` +
+    `Buy:  BTC/ETH/SOL=[${BOS_SCALE_PCT_BUY.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
+    `Sell: BTC/ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%\n` +
     `Reports: every 6h + EOD at 23:55 UTC\n` +
     `Commands: /ping /price /status /report /trades /hist /scan\n` +
-    `Per symbol: /btc /eth /sol /link /pepe  |  /help for full list\n` +
+    `Per symbol: /btc /eth /sol /link /pepe /akt  |  /help for full list\n` +
     `Capital: $${INITIAL_CAPITAL}/symbol  │  ${modeLabelTg}\n\n` +
     `⚠️ If you see TWO of these start messages, a duplicate bot is running.\n` +
     `Use /ping to compare instance IDs — stop the older one.`

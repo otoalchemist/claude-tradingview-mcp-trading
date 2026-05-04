@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Repo Is
 
-A live 24/7 crypto accumulation bot deployed on Railway, trading BTC/ETH/SOL/LINK/PEPE on Coinbase Advanced Trade. The **primary production file** is `craig-accumulation-bot.mjs`. Everything else in the root (`bot.js`, `backtest-*.mjs`, `tv-*.mjs`, `craig-backtest.mjs`) is either legacy, experimental, or tooling.
+A live 24/7 crypto accumulation bot deployed on Railway, trading BTC/ETH/SOL/LINK/PEPE/AKT on Coinbase Advanced Trade. The **primary production file** is `craig-accumulation-bot.mjs`. Everything else in the root (`bot.js`, `backtest-*.mjs`, `tv-*.mjs`, `craig-backtest.mjs`) is either legacy, experimental, or tooling.
 
 ## Running Things
 
@@ -48,6 +48,7 @@ Execution uses two timeframes per symbol: a **regime TF** (EMA50/200 regime dete
 | BTC-USD | 15m | 1h | fetched separately |
 | ETH/SOL/LINK | 5m | 30m | aggregated from 5m exec bars |
 | PEPE-USD | 5m | 4h | fetched as 1h, aggregated 4:1 |
+| AKT-USD | 5m | 15m | fetched directly (FIFTEEN_MINUTE) |
 
 Coinbase has no native 4h granularity — `aggregateCandles(bars, FOUR_HOUR_MS)` synthesises it.
 
@@ -57,6 +58,7 @@ Coinbase has no native 4h granularity — `aggregateCandles(bars, FOUR_HOUR_MS)`
 | BTC/ETH/SOL | [15,15,15,15] flat | [5,10,20,40] back-steep |
 | LINK | [15,15,15,15] flat | [33,33,33,33] flat |
 | PEPE | [33,33,33,33] flat | [30,25,20,10] front-steep |
+| AKT | [33,33,33,33] flat | [5,10,20,40] back-steep |
 
 - **Buy ladder**: % of `regimeStartCapital` per BOS signal (slot 4+ repeats the last value — unlimited signals)
 - **Sell ladder**: % of `regimeStartCryptoQty` per BOS signal (same repeat mechanic)
