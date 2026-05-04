@@ -12,6 +12,7 @@
 //   Death cross  → BUY  regime: scale-in  on each bearish BOS / bullish CHOCH
 //   Golden cross → SELL regime: scale-out on each bullish BOS / bearish CHOCH
 //   Buy  ladder  : [25, 25, 25, 25]% of regime-start capital — UNLIMITED slots  (flat: sweep rank #1/70)
+//                  PEPE override: [35, 25, 15, 10]% — frontload-steep (sweep rank #1 for PEPE)
 //   Sell ladder  : [8, 12, 20, 30]% of regime-start crypto  — UNLIMITED slots  (backload-steep: sweep rank #1/70)
 //   CHOCH        : continues scale (same per-slot %; no all-in)
 //
@@ -106,6 +107,7 @@ const BASE_SIZE_DECIMALS = {
 
 // Per-symbol execution / regime config
 // sellLadder (optional): overrides global BOS_SCALE_PCT_SELL for this symbol only.
+// buyLadder  (optional): overrides global BOS_SCALE_PCT_BUY  for this symbol only.
 const SYMBOL_CONFIG = {
   "BTC-USD": {
     exec:      { gran: "FIFTEEN_MINUTE", secs:  900, bars: 250, label: "15m" },
@@ -126,6 +128,7 @@ const SYMBOL_CONFIG = {
   "PEPE-USD": {
     exec:  { gran: "ONE_MINUTE",     secs:   60, bars: 300, label: "1m"  },
     regime:{ gran: "FIFTEEN_MINUTE", secs:  900, bars: 600, ms: FIFTEEN_MIN_MS, label: "15m" },
+    buyLadder: [35, 25, 15, 10],  // frontload-steep — sweep rank #1 for PEPE (+13.23% avg edge)
   },
 };
 
@@ -690,10 +693,11 @@ async function processSymbol(symbol) {
     // ── 4. Trade execution ───────────────────────────────────────────────────
     const dateStr = new Date(bar.t).toISOString().slice(0, 16).replace("T", " ");
 
-    // Allocation % — buy uses global ladder; sell uses per-symbol override if present
+    // Allocation % — use per-symbol override if present, else fall back to global ladder
+    const symBuyLadder  = cfg.buyLadder  ?? BOS_SCALE_PCT_BUY;
     const symSellLadder = cfg.sellLadder ?? BOS_SCALE_PCT_SELL;
-    const buySlot  = idx => BOS_SCALE_PCT_BUY[Math.min(idx, BOS_SCALE_PCT_BUY.length    - 1)];
-    const sellSlot = idx => symSellLadder    [Math.min(idx, symSellLadder.length         - 1)];
+    const buySlot  = idx => symBuyLadder [Math.min(idx, symBuyLadder.length  - 1)];
+    const sellSlot = idx => symSellLadder[Math.min(idx, symSellLadder.length - 1)];
 
     // ── BUY regime ────────────────────────────────────────────────────────────
     if (state.regime === "buy") {
@@ -1026,7 +1030,7 @@ async function sendPing() {
     `Next scan : ~${nextStr}\n` +
     `Symbols   : ${SYMBOLS.length}  [${SYMBOLS.map(s => s.replace("-USD","")).join(" · ")}]\n` +
     `Capital   : $${INITIAL_CAPITAL}/sym  ($${SYMBOLS.length * INITIAL_CAPITAL} total)\n` +
-    `Buy scale : [${BOS_SCALE_PCT_BUY.join(", ")}]%  UNLIMITED\n` +
+    `Buy scale : [${BOS_SCALE_PCT_BUY.join(", ")}]%  UNLIMITED  (PEPE: [35,25,15,10]%)\n` +
     `Sell scale: [${BOS_SCALE_PCT_SELL.join(", ")}]%  UNLIMITED\n` +
     `Instance  : <code>${BOT_INSTANCE_ID}</code>  ← if you see two IDs, a duplicate is running`
   );
@@ -1203,7 +1207,7 @@ async function sendHelpMessage() {
     `BTC: 1h regime / 15m exec\n` +
     `ETH · SOL · LINK: 30m regime / 5m exec\n` +
     `PEPE: 15m regime / 1m exec\n` +
-    `Buy: [${BOS_SCALE_PCT_BUY.join(", ")}]%  UNLIMITED\n` +
+    `Buy: [${BOS_SCALE_PCT_BUY.join(", ")}]%  UNLIMITED  (PEPE: [35,25,15,10]%)\n` +
     `Sell: [${BOS_SCALE_PCT_SELL.join(", ")}]%  UNLIMITED\n\n` +
     `⏰ Auto-reports: 00/06/12/18 UTC  +  EOD 23:55 UTC`
   );
@@ -1427,10 +1431,11 @@ async function main() {
   console.log("═".repeat(66));
   for (const sym of SYMBOLS) {
     const c    = SYMBOL_CONFIG[sym];
+    const buy  = (c.buyLadder  ?? BOS_SCALE_PCT_BUY).join(",");
     const sell = (c.sellLadder ?? BOS_SCALE_PCT_SELL).join(",");
-    console.log(`  ${sym.padEnd(9)}  exec: ${c.exec.label.padEnd(4)}  regime: ${c.regime.label.padEnd(4)}  EMA${EMA_FAST}/${EMA_SLOW}  sell:[${sell}]%`);
+    console.log(`  ${sym.padEnd(9)}  exec: ${c.exec.label.padEnd(4)}  regime: ${c.regime.label.padEnd(4)}  EMA${EMA_FAST}/${EMA_SLOW}  buy:[${buy}]%  sell:[${sell}]%`);
   }
-  console.log(`  Buy     : [${BOS_SCALE_PCT_BUY.join(", ")}]%  │  Sell (default): [${BOS_SCALE_PCT_SELL.join(", ")}]%  │  UNLIMITED slots`);
+  console.log(`  Buy (default) : [${BOS_SCALE_PCT_BUY.join(", ")}]%  │  Sell (default): [${BOS_SCALE_PCT_SELL.join(", ")}]%  │  UNLIMITED slots`);
   console.log(`  Reports : 6h check-in (00/06/12/18 UTC)  +  EOD at 23:55 UTC`);
   console.log(`  Commands: /ping /price /status /report /trades /hist /scan /btc /eth /sol /link /pepe /help`);
   console.log(`  Capital : $${INITIAL_CAPITAL}/symbol  │  Scan: every 5 min`);
@@ -1442,7 +1447,7 @@ async function main() {
     `BTC: 1h regime / 15m exec\n` +
     `ETH · SOL · LINK: 30m regime / 5m exec\n` +
     `PEPE: 15m regime / 1m exec\n` +
-    `Buy:  [${BOS_SCALE_PCT_BUY.join(", ")}]%  UNLIMITED\n` +
+    `Buy:  [${BOS_SCALE_PCT_BUY.join(", ")}]%  UNLIMITED  (PEPE: [35,25,15,10]%)\n` +
     `Sell: [${BOS_SCALE_PCT_SELL.join(", ")}]%  UNLIMITED\n` +
     `Reports: every 6h + EOD at 23:55 UTC\n` +
     `Commands: /ping /price /status /report /trades /hist /scan\n` +
