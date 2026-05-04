@@ -235,7 +235,7 @@ function buildJWT(method, path) {
   const privateKey = (process.env.COINBASE_PRIVATE_KEY ?? "").replace(/\\n/g, "\n");
   const now   = Math.floor(Date.now() / 1000);
   const nonce = crypto.randomBytes(16).toString("hex");
-  const uri   = `${method} api.coinbase.com${path}`;
+  const uri   = `${method} api.coinbase.com${path.split("?")[0]}`; // strip query params — Coinbase JWT uri must be method+host+path only
   const header  = Buffer.from(JSON.stringify({ alg: "ES256", kid: apiKey, nonce })).toString("base64url");
   const payload = Buffer.from(JSON.stringify({ sub: apiKey, iss: "cdp", nbf: now, exp: now + 120, uri })).toString("base64url");
   const sigInput  = `${header}.${payload}`;
