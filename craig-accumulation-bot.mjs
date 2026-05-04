@@ -1438,15 +1438,22 @@ async function main() {
     } catch (e) {
       console.error(`[CB Key diag] key parse FAILED: ${e.message}`);
     }
-    // ── Quick auth check — logs HTTP status + raw body so we can diagnose 401s ─
+    // ── Quick auth check — logs key ID, JWT claims, HTTP status + headers ────────
     (async () => {
       try {
-        const testRes = await fetch("https://api.coinbase.com/api/v3/brokerage/accounts?limit=1", {
-          headers: { "Authorization": `Bearer ${buildJWT("GET", "/api/v3/brokerage/accounts?limit=1")}` },
+        const apiKeyId = process.env.COINBASE_API_KEY ?? "";
+        console.log(`[CB Auth check] key ID prefix: "${apiKeyId.slice(0, 60)}"`);
+        const jwt = buildJWT("GET", "/api/v3/brokerage/accounts");
+        const payloadB64 = jwt.split(".")[1];
+        const claims = JSON.parse(Buffer.from(payloadB64, "base64url").toString());
+        console.log(`[CB Auth check] JWT claims: sub=${claims.sub?.slice(-36)} iss=${claims.iss} uri="${claims.uri}"`);
+        const testRes = await fetch("https://api.coinbase.com/api/v3/brokerage/accounts", {
+          headers: { "Authorization": `Bearer ${jwt}`, "Content-Type": "application/json" },
           signal: AbortSignal.timeout(10_000),
         });
         const testBody = await testRes.text();
-        console.log(`[CB Auth check] HTTP ${testRes.status} — body[:200]: ${testBody.slice(0, 200)}`);
+        const wwwAuth  = testRes.headers.get("www-authenticate") ?? "(none)";
+        console.log(`[CB Auth check] HTTP ${testRes.status} www-auth: ${wwwAuth} — body[:300]: ${testBody.slice(0, 300)}`);
       } catch (e) {
         console.error(`[CB Auth check] request failed: ${e.message}`);
       }
