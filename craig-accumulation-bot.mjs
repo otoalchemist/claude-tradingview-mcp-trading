@@ -7,7 +7,7 @@
 //   ETH-USD  : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
 //   SOL-USD  : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
 //   LINK-USD : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
-//   PEPE-USD : 15m EMA50/200 regime  →   1m BOS/CHOCH execution
+//   PEPE-USD :  4h EMA50/200 regime  →   5m BOS/CHOCH execution  (4h aggregated from 1h bars)
 //
 //   Death cross  → BUY  regime: scale-in  on each bearish BOS / bullish CHOCH
 //   Golden cross → SELL regime: scale-out on each bullish BOS / bearish CHOCH
@@ -69,6 +69,7 @@ function acquireInstanceLock() {
 
 // ── Time constants ────────────────────────────────────────────────────────────
 const HOUR_MS        = 3_600_000;
+const FOUR_HOUR_MS   = 4 * HOUR_MS;   // 14_400_000 — Coinbase has no 4h granularity; we aggregate from 1h
 const THIRTY_MIN_MS  = 1_800_000;
 const FIFTEEN_MIN_MS =   900_000;
 
@@ -126,9 +127,10 @@ const SYMBOL_CONFIG = {
     regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 600, ms: THIRTY_MIN_MS,  label: "30m" },
   },
   "PEPE-USD": {
-    exec:  { gran: "ONE_MINUTE",     secs:   60, bars: 300, label: "1m"  },
-    regime:{ gran: "FIFTEEN_MINUTE", secs:  900, bars: 600, ms: FIFTEEN_MIN_MS, label: "15m" },
-    buyLadder: [35, 25, 15, 10],  // frontload-steep — sweep rank #1 for PEPE (+13.23% avg edge)
+    exec:   { gran: "FIVE_MINUTE", secs:  300, bars: 300, label: "5m"  },
+    regime: { gran: "ONE_HOUR",    secs: 3600, bars: 1000, ms: FOUR_HOUR_MS, label: "4h",
+              aggFrom: HOUR_MS },  // fetch 1h bars, aggregate 4:1 → synthetic 4h regime
+    buyLadder: [35, 25, 15, 10],  // frontload-steep — backtest sweep rank #1 for PEPE (+13.23% avg edge)
   },
 };
 
@@ -192,8 +194,9 @@ async function registerBotCommands() {
     { command: "trades", description: "Today's trades by symbol" },
     { command: "hist",   description: "Last 20 trades across all symbols" },
     { command: "scan",   description: "Trigger an immediate scan now" },
-    { command: "pause",  description: "Pause a symbol: /pause btc  or  /pause all" },
-    { command: "resume", description: "Resume a symbol: /resume btc  or  /resume all" },
+    { command: "pause",   description: "Pause a symbol: /pause btc  or  /pause all" },
+    { command: "resume",  description: "Resume a symbol: /resume btc  or  /resume all" },
+    { command: "setcash", description: "Fix cash balance: /setcash link 0" },
     { command: "btc",    description: "BTC-USD snapshot" },
     { command: "eth",    description: "ETH-USD snapshot" },
     { command: "sol",    description: "SOL-USD snapshot" },
@@ -394,6 +397,26 @@ async function fetchCandles(symbol, gran, secs, numBars) {
     .slice(-numBars);
 }
 
+// ── Candle aggregation (e.g. 1h → 4h) ────────────────────────────────────────
+// Used when Coinbase has no native granularity for the desired regime TF.
+// Each bucket keyed by floor(t / targetMs)*targetMs — same anchor logic as the
+// backtest scripts so signals are identical to what the backtests measured.
+function aggregateCandles(bars, targetMs) {
+  const buckets = new Map();
+  for (const b of bars) {
+    const bucket = Math.floor(b.t / targetMs) * targetMs;
+    if (!buckets.has(bucket)) {
+      buckets.set(bucket, { t: bucket, o: b.o, h: b.h, l: b.l, c: b.c });
+    } else {
+      const agg = buckets.get(bucket);
+      agg.h = Math.max(agg.h, b.h);
+      agg.l = Math.min(agg.l, b.l);
+      agg.c = b.c;   // last bar in bucket = close
+    }
+  }
+  return [...buckets.values()].sort((a, b) => a.t - b.t);
+}
+
 // ── EMA ───────────────────────────────────────────────────────────────────────
 function calcEMA(closes, period) {
   const out = new Array(closes.length).fill(null);
@@ -565,7 +588,17 @@ async function processSymbol(symbol) {
     return;
   }
 
-  const { crossMap, stateMap } = buildRegime(candlesRegime, cfg.regime.ms);
+  // Aggregate regime candles when aggFrom is set (e.g. 1h bars → synthetic 4h for PEPE)
+  const regimeBarsForBuild = cfg.regime.aggFrom
+    ? aggregateCandles(candlesRegime, cfg.regime.ms)
+    : candlesRegime;
+
+  if (cfg.regime.aggFrom && regimeBarsForBuild.length < 210) {
+    console.log(`[${symbol}] Insufficient aggregated regime bars (${regimeBarsForBuild.length} after ${cfg.regime.label} agg) — skipping`);
+    return;
+  }
+
+  const { crossMap, stateMap } = buildRegime(regimeBarsForBuild, cfg.regime.ms);
 
   // ── On first run: detect current regime ──────────────────────────────────
   if (!state.initialized) {
@@ -672,7 +705,7 @@ async function processSymbol(symbol) {
     }
 
     // ── 3. Regime change check ────────────────────────────────────────────────
-    // Checked at each regime-candle boundary (every 1h for BTC, every 30m for ETH/SOL)
+    // Checked at each regime-candle boundary (every 1h for BTC; every 30m for ETH/SOL/LINK; every 4h for PEPE)
     if (bar.t % cfg.regime.ms === 0) {
       const cross = crossMap.get(bar.t);
       if (cross === "death" && state.regime !== "buy") {
@@ -1038,6 +1071,7 @@ async function sendPing() {
     `Next scan : ~${nextStr}\n` +
     `Symbols   : ${SYMBOLS.length}  [${SYMBOLS.map(s => s.replace("-USD","")).join(" · ")}]\n` +
     `Capital   : $${INITIAL_CAPITAL}/sym  ($${SYMBOLS.length * INITIAL_CAPITAL} total)\n` +
+    `Regimes   : BTC=1h  ETH/SOL/LINK=30m  PEPE=4h (agg from 1h)\n` +
     `Buy scale : [${BOS_SCALE_PCT_BUY.join(", ")}]%  UNLIMITED  (PEPE: [35,25,15,10]%)\n` +
     `Sell scale: [${BOS_SCALE_PCT_SELL.join(", ")}]%  UNLIMITED\n` +
     `Instance  : <code>${BOT_INSTANCE_ID}</code>  ← if you see two IDs, a duplicate is running`
@@ -1215,7 +1249,7 @@ async function sendHelpMessage() {
     `<b>Strategy</b>\n` +
     `BTC: 1h regime / 15m exec\n` +
     `ETH · SOL · LINK: 30m regime / 5m exec\n` +
-    `PEPE: 15m regime / 1m exec\n` +
+    `PEPE: 4h regime (agg from 1h) / 5m exec\n` +
     `Buy: [${BOS_SCALE_PCT_BUY.join(", ")}]%  UNLIMITED  (PEPE: [35,25,15,10]%)\n` +
     `Sell: [${BOS_SCALE_PCT_SELL.join(", ")}]%  UNLIMITED\n\n` +
     `⏰ Auto-reports: 00/06/12/18 UTC  +  EOD 23:55 UTC`
@@ -1503,7 +1537,7 @@ async function main() {
     `Instance: <code>${BOT_INSTANCE_ID}</code>\n\n` +
     `BTC: 1h regime / 15m exec\n` +
     `ETH · SOL · LINK: 30m regime / 5m exec\n` +
-    `PEPE: 15m regime / 1m exec\n` +
+    `PEPE: 4h regime (agg from 1h) / 5m exec\n` +
     `Buy:  [${BOS_SCALE_PCT_BUY.join(", ")}]%  UNLIMITED  (PEPE: [35,25,15,10]%)\n` +
     `Sell: [${BOS_SCALE_PCT_SELL.join(", ")}]%  UNLIMITED\n` +
     `Reports: every 6h + EOD at 23:55 UTC\n` +
