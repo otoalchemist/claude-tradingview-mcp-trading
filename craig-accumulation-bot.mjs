@@ -959,8 +959,12 @@ function buildSymbolReport(symbol) {
     const deployedPct = (s.cryptoQty * price) / (portVal || 1) * 100;
     deployLine = `\nDeployed: ${deployedPct.toFixed(0)}% in crypto  │  Signals: ${s.bosCount}`;
   } else if (s.regime === "sell") {
-    const soldPct = s.regimeStartCryptoQty > 0
-      ? (1 - s.cryptoQty / s.regimeStartCryptoQty) * 100 : 0;
+    // If cryptoQty is effectively zero → fully distributed regardless of baseline
+    const soldPct = s.cryptoQty <= MIN_ORDER_QTY
+      ? 100
+      : s.regimeStartCryptoQty > 0
+        ? (1 - s.cryptoQty / s.regimeStartCryptoQty) * 100
+        : 0;  // baseline unknown — show 0 rather than mislead
     deployLine = `\nDistributed: ${soldPct.toFixed(0)}% of crypto  │  Signals: ${s.bosCount}`;
   }
 
@@ -1167,8 +1171,11 @@ async function sendRegimeOverview() {
         const pct = val > 0 ? (dep / val * 100).toFixed(0) : 0;
         detail = `dep:${pct}% sig:${s.bosCount}`;
       } else if (s.regime === "sell") {
-        const sp = s.regimeStartCryptoQty > 0
-          ? ((1 - s.cryptoQty / s.regimeStartCryptoQty) * 100).toFixed(0) : "—";
+        const sp = s.cryptoQty <= MIN_ORDER_QTY
+          ? "100"
+          : s.regimeStartCryptoQty > 0
+            ? ((1 - s.cryptoQty / s.regimeStartCryptoQty) * 100).toFixed(0)
+            : "—";
         detail = `sold:${sp}% sig:${s.bosCount}`;
       }
       const pauseTag = s.tradingPaused ? " ⏸" : "";
