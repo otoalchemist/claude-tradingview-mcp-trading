@@ -196,7 +196,8 @@ async function registerBotCommands() {
     { command: "scan",   description: "Trigger an immediate scan now" },
     { command: "pause",   description: "Pause a symbol: /pause btc  or  /pause all" },
     { command: "resume",  description: "Resume a symbol: /resume btc  or  /resume all" },
-    { command: "setcash", description: "Fix cash balance: /setcash link 0" },
+    { command: "setcash",      description: "Fix cash balance: /setcash link 0" },
+    { command: "setregimeqty", description: "Fix sell baseline: /setregimeqty link 10.93" },
     { command: "btc",    description: "BTC-USD snapshot" },
     { command: "eth",    description: "ETH-USD snapshot" },
     { command: "sol",    description: "SOL-USD snapshot" },
@@ -602,7 +603,24 @@ async function processSymbol(symbol) {
 
   // ── On first run: detect current regime ──────────────────────────────────
   if (!state.initialized) {
-    const lastBar     = candlesExec.at(-1);
+    const lastBar = candlesExec.at(-1);
+
+    // Live: sync actual crypto balance FIRST so regime init uses the correct qty.
+    // BUG FIXED: previously cryptoQty was fetched AFTER regimeStartCryptoQty was set,
+    // causing regimeStartCryptoQty=0 even when the account held real crypto.
+    // That silently zeroed every sell order: sellQty = 0 * sellPct% = 0 → skipped.
+    if (LIVE_TRADING) {
+      try {
+        const pos = await fetchCoinbasePosition(symbol);
+        state.cryptoQty = pos.cryptoQty;
+        console.log(`[${symbol}] Live init: cryptoQty=${pos.cryptoQty}  totalUSD=$${pos.usdTotal.toFixed(2)}`);
+      } catch (e) {
+        console.error(`[${symbol}] Live init balance fetch failed: ${e.message}`);
+      }
+    }
+    reconciledThisSession.add(symbol);   // mark as reconciled — skip the startup check
+
+    // Now determine regime with accurate cryptoQty
     const periodMs    = cfg.regime.ms;
     const recentClose = Math.floor(lastBar.t / periodMs) * periodMs;
     const initS       = stateMap.get(recentClose);
@@ -614,24 +632,12 @@ async function processSymbol(symbol) {
       state.regimeCount.buy++;
     } else if (initS === "golden") {
       state.regime                = "sell";
-      state.regimeStartCryptoQty  = state.cryptoQty;
+      state.regimeStartCryptoQty  = state.cryptoQty;   // now correct — real balance already loaded above
       state.regimeStartPrice      = lastBar.c;
       state.regimeCount.sell++;
     } else {
       state.regime = "neutral";
     }
-
-    // Live: sync actual crypto balance at init time
-    if (LIVE_TRADING) {
-      try {
-        const pos = await fetchCoinbasePosition(symbol);
-        state.cryptoQty = pos.cryptoQty;
-        console.log(`[${symbol}] Live init: cryptoQty=${pos.cryptoQty}  totalUSD=$${pos.usdTotal.toFixed(2)}`);
-      } catch (e) {
-        console.error(`[${symbol}] Live init balance fetch failed: ${e.message}`);
-      }
-    }
-    reconciledThisSession.add(symbol);   // mark as reconciled — skip the startup check
 
     state.lastPrice         = lastBar.c;
     state.lastProcessedBarT = lastBar.t;
@@ -1244,7 +1250,8 @@ async function sendHelpMessage() {
     `/resume &lt;sym&gt;       — Resume trading for a symbol\n` +
     `/pause all           — Pause ALL symbols\n` +
     `/resume all          — Resume ALL symbols\n` +
-    `/setcash &lt;sym&gt; &lt;$&gt; — Manually correct cash balance (e.g. /setcash link 0)\n` +
+    `/setcash &lt;sym&gt; &lt;$&gt;      — Manually correct cash balance\n` +
+    `/setregimeqty &lt;sym&gt; &lt;qty&gt; — Fix sell baseline qty (e.g. /setregimeqty link 10.93)\n` +
     `/help                — This message\n\n` +
     `<b>Strategy</b>\n` +
     `BTC: 1h regime / 15m exec\n` +
@@ -1333,6 +1340,27 @@ async function startTelegramPoller() {
             st.cash = amount;
             saveState(sym, st);
             await sendTelegram(`✅ <b>${sym}</b> cash updated: $${old} → $${amount.toFixed(2)}`);
+          }
+        } else if (cmd === "/setregimeqty") {
+          // /setregimeqty <symbol> <qty>  e.g. /setregimeqty link 10.93
+          // Fixes regimeStartCryptoQty when it was zeroed out at init (sell-regime init bug).
+          const parts  = rawText.trim().split(/\s+/);
+          const symRaw = (parts[1] || "").toUpperCase();
+          const sym    = symRaw.includes("-") ? symRaw : `${symRaw}-USD`;
+          const qty    = parseFloat(parts[2]);
+          if (!SYMBOL_CONFIG[sym] || isNaN(qty) || qty < 0) {
+            await sendTelegram(`❌ Usage: /setregimeqty &lt;symbol&gt; &lt;qty&gt;\nExample: <code>/setregimeqty LINK 10.93</code>\n\nSets regimeStartCryptoQty — the baseline used to calculate sell ladder sizes.`);
+          } else {
+            const st  = loadState(sym);
+            const old = st.regimeStartCryptoQty;
+            st.regimeStartCryptoQty = qty;
+            saveState(sym, st);
+            const pct = ((qty * st.lastPrice)).toFixed(2);
+            await sendTelegram(
+              `✅ <b>${sym}</b> regimeStartCryptoQty updated: ${fQty(old)} → ${fQty(qty)}\n` +
+              `≈ $${pct} @ current price\n` +
+              `Sell ladder will now use this as the 100% baseline.`
+            );
           }
         } else if (cmd === "/pause") {
           await cmdPauseSymbol(cmdArg || "");
