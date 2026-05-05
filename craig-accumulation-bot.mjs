@@ -526,6 +526,7 @@ function makeFreshState(symbol) {
     bosCount:             0,
     cash:                 INITIAL_CAPITAL,
     cryptoQty:            0,
+    preExistingCryptoQty: 0,               // crypto held before bot started managing this symbol
     regimeStartCapital:   INITIAL_CAPITAL,
     regimeStartCryptoQty: 0,
     regimeStartPrice:     0,               // price when current regime started (for HODL comparison)
@@ -558,6 +559,17 @@ function loadState(symbol) {
     if (!("regimeStartCryptoQty" in state)) state.regimeStartCryptoQty = 0;
     if (!("tradingPaused"        in state)) state.tradingPaused        = false;
     if (!("regimeCount"          in state)) state.regimeCount          = { buy: 0, sell: 0 };
+    if (!("preExistingCryptoQty" in state)) {
+      // Migration: derive bot-accumulated qty from trade log; remainder is pre-existing balance
+      // (e.g. if cryptoQty=300 and bot trades show net 50 bought, pre-existing = 250)
+      const botNetQty = (state.trades ?? []).reduce((sum, t) => {
+        if (t.type === "scaled_buy")  return sum + (t.qty ?? 0);
+        if (t.type === "scaled_sell") return sum - (t.qty ?? 0);
+        return sum;
+      }, 0);
+      state.preExistingCryptoQty = Math.max(0, state.cryptoQty - Math.max(0, botNetQty));
+      state.cryptoQty            = Math.max(0, botNetQty);
+    }
     return state;
   } catch {
     return makeFreshState(symbol);
@@ -609,16 +621,19 @@ async function processSymbol(symbol) {
     reconciledThisSession.add(symbol);
     try {
       const pos = await fetchCoinbasePosition(symbol);
-      if (Math.abs(state.cryptoQty - pos.cryptoQty) > 1e-6) {
+      // Bot-managed qty = real balance minus any pre-existing balance at init time
+      const botQty = Math.max(0, pos.cryptoQty - (state.preExistingCryptoQty ?? 0));
+      if (Math.abs(state.cryptoQty - botQty) > 1e-6) {
         const msg = `⚠️ <b>${symbol}</b> position reconciled on startup\n` +
-          `State: ${fQty(state.cryptoQty)} → Actual: ${fQty(pos.cryptoQty)}\n` +
+          `State: ${fQty(state.cryptoQty)} → Actual bot-managed: ${fQty(botQty)}\n` +
+          `(preExisting: ${fQty(state.preExistingCryptoQty ?? 0)}  total on exchange: ${fQty(pos.cryptoQty)})\n` +
           `Total USD on exchange: $${pos.usdTotal.toFixed(2)}`;
-        console.log(`[${symbol}] Reconcile: cryptoQty ${state.cryptoQty} → ${pos.cryptoQty}`);
-        state.cryptoQty = pos.cryptoQty;
+        console.log(`[${symbol}] Reconcile: botQty ${state.cryptoQty} → ${botQty} (preExisting: ${state.preExistingCryptoQty ?? 0})`);
+        state.cryptoQty = botQty;
         saveState(symbol, state);
         await sendTelegram(msg);
       } else {
-        console.log(`[${symbol}] Reconcile OK: cryptoQty=${state.cryptoQty}  USD on exchange: $${pos.usdTotal.toFixed(2)}`);
+        console.log(`[${symbol}] Reconcile OK: botQty=${state.cryptoQty}  preExisting=${state.preExistingCryptoQty ?? 0}  total on exchange: ${fQty(pos.cryptoQty)}`);
       }
     } catch (e) {
       console.error(`[${symbol}] Reconcile failed: ${e.message}`);
@@ -670,8 +685,11 @@ async function processSymbol(symbol) {
     if (LIVE_TRADING) {
       try {
         const pos = await fetchCoinbasePosition(symbol);
-        state.cryptoQty = pos.cryptoQty;
-        console.log(`[${symbol}] Live init: cryptoQty=${pos.cryptoQty}  totalUSD=$${pos.usdTotal.toFixed(2)}`);
+        // Record pre-existing balance so the bot only tracks its own $INITIAL_CAPITAL
+        // allocation. P&L, sell sizing, and reconciliation all exclude preExistingCryptoQty.
+        state.preExistingCryptoQty = pos.cryptoQty;
+        state.cryptoQty            = 0;   // bot starts fresh — only counts what IT buys/sells
+        console.log(`[${symbol}] Live init: preExisting=${pos.cryptoQty}  botQty=0  totalUSD=$${pos.usdTotal.toFixed(2)}`);
       } catch (e) {
         console.error(`[${symbol}] Live init balance fetch failed: ${e.message}`);
       }
