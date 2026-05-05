@@ -12,12 +12,13 @@ indicator("Craig Accum Bot - Signals", overlay=true, max_labels_count=500, max_l
 //   Timeframe guide (set Regime TF input to match your symbol):
 //     BTC-USD          exec: 15m  regime: 60
 //     ETH/SOL/LINK     exec: 5m   regime: 30
-//     PEPE             exec: 1m   regime: 15
+//     PEPE-USD         exec: 5m   regime: 60
+//     AKT-USD          exec: 5m   regime: 15
 // =============================================================================
 
 // --- INPUTS ------------------------------------------------------------------
-// Regime TF: BTC=60, ETH/SOL/LINK=30, PEPE=15
-i_regimeTF   = input.timeframe("30", "Regime TF  (BTC=60 | ETH/SOL/LINK=30 | PEPE=15)")
+// Regime TF: BTC=60, ETH/SOL/LINK=30, PEPE=60, AKT=15
+i_regimeTF   = input.timeframe("30", "Regime TF  (BTC=60 | ETH/SOL/LINK=30 | PEPE=60 | AKT=15)")
 i_emaFast    = input.int(50,  "EMA Fast", minval=1)
 i_emaSlow    = input.int(200, "EMA Slow", minval=1)
 i_swingLB    = input.int(5,   "Swing Lookback (offset hardcoded -5)", minval=1)
@@ -29,9 +30,11 @@ i_showSwings = input.bool(true,  "Show Swing H/L Dots",    group="Display")
 i_showBOSlbl = input.bool(true,  "Show BOS/CHOCH Labels",  group="Display")
 
 // --- REGIME TF : EMA 50 / 200 ------------------------------------------------
-// Two separate security calls avoids tuple-destructuring line-continuation issues
-regEmaF = request.security(syminfo.tickerid, i_regimeTF, ta.ema(close, i_emaFast), lookahead=barmerge.lookahead_off)
-regEmaS = request.security(syminfo.tickerid, i_regimeTF, ta.ema(close, i_emaSlow), lookahead=barmerge.lookahead_off)
+// [1] inside security + lookahead_on gives us the PREVIOUS confirmed regime bar's
+// EMA — never the live developing bar.  This matches the bot exactly (buildRegime
+// only uses closed candles) and prevents repainting on the live bar.
+regEmaF = request.security(syminfo.tickerid, i_regimeTF, ta.ema(close, i_emaFast)[1], lookahead=barmerge.lookahead_on)
+regEmaS = request.security(syminfo.tickerid, i_regimeTF, ta.ema(close, i_emaSlow)[1], lookahead=barmerge.lookahead_on)
 
 plot(i_showEMAs ? regEmaF : na, "EMA 50  (Regime TF)", color=color.new(color.orange, 0), linewidth=2)
 plot(i_showEMAs ? regEmaS : na, "EMA 200 (Regime TF)", color=color.new(color.blue, 0),   linewidth=2)
@@ -39,8 +42,9 @@ plot(i_showEMAs ? regEmaS : na, "EMA 200 (Regime TF)", color=color.new(color.blu
 // --- REGIME STATE ------------------------------------------------------------
 // Death cross  (EMA50 crosses BELOW EMA200) = BUY  regime (accumulate on dips)
 // Golden cross (EMA50 crosses ABOVE EMA200) = SELL regime (distribute on rallies)
-goldenCross = ta.crossover(regEmaF,  regEmaS)
-deathCross  = ta.crossunder(regEmaF, regEmaS)
+// Explicit comparison on closed bars — mirrors buildRegime() in the bot.
+goldenCross = regEmaF[1] <= regEmaS[1] and regEmaF > regEmaS
+deathCross  = regEmaF[1] >= regEmaS[1] and regEmaF < regEmaS
 
 var string regime = "neutral"
 if not na(regEmaF) and not na(regEmaS)
@@ -113,11 +117,17 @@ if i_showBOSlbl
         label.new(bar_index, lastSL, "CHOCH dn", color=color.new(color.red, 10), textcolor=color.white, style=label.style_label_down, size=size.small)
 
 // --- TRADE SIGNAL DETECTION --------------------------------------------------
-// bosCount resets on regime change - matches bot state.bosCount = 0
-// chochArmed: CHOCH only fires after >= 1 BOS in regime (when i_reqBOS = true)
+// bosCount, structure, and pivots all reset on regime change — matches the bot:
+//   state.bosCount = 0; state.structure = 0; state.lastSH = null; state.lastSL = null;
+// Without this reset, stale structure from the old regime causes the first break
+// in the new regime to be classified as CHOCH instead of BOS, silently dropping
+// the signal (e.g. bullCHOCH in sell regime is not a sell signal).
 var int bosCount = 0
 if goldenCross or deathCross
-    bosCount := 0
+    bosCount  := 0
+    structure := 0
+    lastSH    := na
+    lastSL    := na
 
 chochArmed = not i_reqBOS or bosCount >= 1
 
@@ -145,7 +155,18 @@ if sellSignal
     label.new(bar_index, na, "SELL #" + str.tostring(bosCount) + "  " + (sellBOS ? "BOS" : "CHOCH"), yloc=yloc.abovebar, color=color.red, textcolor=color.white, style=label.style_label_down, size=size.small)
 
 // --- INFO TABLE --------------------------------------------------------------
-var table tbl = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 75), border_width=1, border_color=color.new(color.gray, 60))
+// Ladder reference (matches SYMBOL_CONFIG in craig-accumulation-bot.mjs):
+//   BTC/ETH/SOL  buy: 15·15·15·15  sell: 5·10·20·40
+//   LINK         buy: 15·15·15·15  sell: 33·33·33·33
+//   PEPE         buy: 33·33·33·33  sell: 33·33·33·33
+//   AKT          buy: 33·33·33·33  sell:  5·10·20·40
+i_sym = input.string("BTC/ETH/SOL", "Symbol (for ladder display)",
+          options=["BTC/ETH/SOL", "LINK", "PEPE", "AKT"])
+
+f_buyLadder(s)  => s == "LINK" ? "15·15·15·15" : s == "PEPE" ? "33·33·33·33" : s == "AKT" ? "33·33·33·33" : "15·15·15·15"
+f_sellLadder(s) => s == "LINK" ? "33·33·33·33" : s == "PEPE" ? "33·33·33·33" : s == "AKT" ?  "5·10·20·40" :  "5·10·20·40"
+
+var table tbl = table.new(position.top_right, 2, 9, bgcolor=color.new(color.black, 75), border_width=1, border_color=color.new(color.gray, 60))
 
 if barstate.islast
     rc = regime == "buy" ? color.lime : regime == "sell" ? color.red : color.gray
@@ -162,7 +183,9 @@ if barstate.islast
     table.cell(tbl, 1, 4, str.tostring(regEmaS, "#.####"),  text_color=color.new(color.blue, 0), text_size=size.small)
     table.cell(tbl, 0, 5, "Signals",   text_color=color.silver, text_size=size.small)
     table.cell(tbl, 1, 5, str.tostring(bosCount), text_color=color.white, text_size=size.small)
-    table.cell(tbl, 0, 6, "Buy %",     text_color=color.silver, text_size=size.small)
-    table.cell(tbl, 1, 6, "8·12·18·27", text_color=color.new(color.lime, 20), text_size=size.small)
-    table.cell(tbl, 0, 7, "Sell %",    text_color=color.silver, text_size=size.small)
-    table.cell(tbl, 1, 7, "15·18·27·27", text_color=color.new(color.red, 20), text_size=size.small)
+    table.cell(tbl, 0, 6, "Symbol",    text_color=color.silver, text_size=size.small)
+    table.cell(tbl, 1, 6, i_sym,       text_color=color.white,  text_size=size.small)
+    table.cell(tbl, 0, 7, "Buy %",     text_color=color.silver, text_size=size.small)
+    table.cell(tbl, 1, 7, f_buyLadder(i_sym),  text_color=color.new(color.lime, 20), text_size=size.small)
+    table.cell(tbl, 0, 8, "Sell %",    text_color=color.silver, text_size=size.small)
+    table.cell(tbl, 1, 8, f_sellLadder(i_sym), text_color=color.new(color.red, 20),  text_size=size.small)

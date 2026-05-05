@@ -216,8 +216,9 @@ async function registerBotCommands() {
     { command: "scan",   description: "Trigger an immediate scan now" },
     { command: "pause",   description: "Pause a symbol: /pause btc  or  /pause all" },
     { command: "resume",  description: "Resume a symbol: /resume btc  or  /resume all" },
-    { command: "setcash",      description: "Fix cash balance: /setcash link 0" },
-    { command: "setregimeqty", description: "Fix sell baseline: /setregimeqty link 10.93" },
+    { command: "setcash",        description: "Fix cash balance: /setcash link 0" },
+    { command: "setregimeqty",   description: "Fix sell baseline: /setregimeqty link 10.93" },
+    { command: "setpreexisting", description: "Fix pre-existing balance offset: /setpreexisting link 0" },
     { command: "btc",    description: "BTC-USD snapshot" },
     { command: "eth",    description: "ETH-USD snapshot" },
     { command: "sol",    description: "SOL-USD snapshot" },
@@ -560,15 +561,24 @@ function loadState(symbol) {
     if (!("tradingPaused"        in state)) state.tradingPaused        = false;
     if (!("regimeCount"          in state)) state.regimeCount          = { buy: 0, sell: 0 };
     if (!("preExistingCryptoQty" in state)) {
-      // Migration: derive bot-accumulated qty from trade log; remainder is pre-existing balance
+      // Migration: derive bot-accumulated qty from trade log; remainder is pre-existing balance.
       // (e.g. if cryptoQty=300 and bot trades show net 50 bought, pre-existing = 250)
+      //
+      // Special case: botNetQty < 0 means more sells than buys in the log — this is an
+      // inherited sell-regime position (e.g. LINK set up via /setregimeqty with no prior
+      // buy trades). Treat as fully bot-managed; do NOT strip cryptoQty.
       const botNetQty = (state.trades ?? []).reduce((sum, t) => {
         if (t.type === "scaled_buy")  return sum + (t.qty ?? 0);
         if (t.type === "scaled_sell") return sum - (t.qty ?? 0);
         return sum;
       }, 0);
-      state.preExistingCryptoQty = Math.max(0, state.cryptoQty - Math.max(0, botNetQty));
-      state.cryptoQty            = Math.max(0, botNetQty);
+      if (botNetQty >= 0) {
+        state.preExistingCryptoQty = Math.max(0, state.cryptoQty - botNetQty);
+        state.cryptoQty            = Math.max(0, botNetQty);
+      } else {
+        // Inherited position — no pre-existing offset; reconciliation will sync cryptoQty
+        state.preExistingCryptoQty = 0;
+      }
     }
     return state;
   } catch {
@@ -1348,6 +1358,7 @@ async function sendHelpMessage() {
     `/resume all          — Resume ALL symbols\n` +
     `/setcash &lt;sym&gt; &lt;$&gt;      — Manually correct cash balance\n` +
     `/setregimeqty &lt;sym&gt; &lt;qty&gt; — Fix sell baseline qty (e.g. /setregimeqty link 10.93)\n` +
+    `/setpreexisting &lt;sym&gt; &lt;qty&gt; — Fix pre-existing balance offset (e.g. /setpreexisting link 0)\n` +
     `/help                — This message\n\n` +
     `<b>Strategy</b>\n` +
     `BTC: 1h regime / 15m exec\n` +
@@ -1458,6 +1469,41 @@ async function startTelegramPoller() {
               `≈ $${pct} @ current price\n` +
               `Sell ladder will now use this as the 100% baseline.`
             );
+          }
+        } else if (cmd === "/setpreexisting") {
+          // /setpreexisting <symbol> <qty>  e.g. /setpreexisting link 0
+          // Fixes preExistingCryptoQty and immediately re-derives botQty from the exchange.
+          // Use when migration wrongly classified bot-managed crypto as pre-existing.
+          const parts  = rawText.trim().split(/\s+/);
+          const symRaw = (parts[1] || "").toUpperCase();
+          const sym    = symRaw.includes("-") ? symRaw : `${symRaw}-USD`;
+          const qty    = parseFloat(parts[2]);
+          if (!SYMBOL_CONFIG[sym] || isNaN(qty) || qty < 0) {
+            await sendTelegram(`❌ Usage: /setpreexisting &lt;symbol&gt; &lt;qty&gt;\nExample: <code>/setpreexisting LINK 0</code>\n\nSets preExistingCryptoQty (crypto held before bot started managing this symbol).`);
+          } else {
+            const st    = loadState(sym);
+            const oldPx = st.preExistingCryptoQty ?? 0;
+            st.preExistingCryptoQty = qty;
+            // Immediately re-derive bot-managed qty from exchange (don't wait for next startup reconcile)
+            if (LIVE_TRADING) {
+              try {
+                const pos = await fetchCoinbasePosition(sym);
+                st.cryptoQty = Math.max(0, pos.cryptoQty - qty);
+                saveState(sym, st);
+                const portVal = st.cash + st.cryptoQty * st.lastPrice;
+                await sendTelegram(
+                  `✅ <b>${sym}</b> preExistingCryptoQty: ${fQty(oldPx)} → ${fQty(qty)}\n` +
+                  `Bot-managed qty: ${fQty(st.cryptoQty)}  (real on exchange: ${fQty(pos.cryptoQty)})\n` +
+                  `Portfolio: $${portVal.toFixed(2)}`
+                );
+              } catch (e) {
+                saveState(sym, st);
+                await sendTelegram(`⚠️ <b>${sym}</b> preExistingCryptoQty set to ${fQty(qty)} but balance fetch failed: ${e.message}`);
+              }
+            } else {
+              saveState(sym, st);
+              await sendTelegram(`✅ <b>${sym}</b> preExistingCryptoQty: ${fQty(oldPx)} → ${fQty(qty)} (paper mode — no balance sync)`);
+            }
           }
         } else if (cmd === "/pause") {
           await cmdPauseSymbol(cmdArg || "");
