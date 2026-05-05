@@ -719,6 +719,7 @@ async function processSymbol(symbol) {
     } else if (initS === "golden") {
       state.regime                = "sell";
       state.regimeStartCryptoQty  = state.cryptoQty;   // now correct — real balance already loaded above
+      state.regimeStartCapital    = state.cash + state.cryptoQty * lastBar.c;  // full portfolio value at sell start
       state.regimeStartPrice      = lastBar.c;
       state.regimeCount.sell++;
     } else {
@@ -816,6 +817,7 @@ async function processSymbol(symbol) {
         state.regime                = "sell";
         state.bosCount              = 0;
         state.regimeStartCryptoQty  = state.cryptoQty;
+        state.regimeStartCapital    = state.cash + state.cryptoQty * bar.c;  // full portfolio value at sell start
         state.regimeStartPrice      = bar.c;
         state.regimeCount.sell++;
         // Reset structure tracking so stale pivots from the old regime don't fire false signals
@@ -983,7 +985,13 @@ function buildSymbolReport(symbol) {
   const cfg       = SYMBOL_CONFIG[symbol];
   const price     = s.lastPrice || 0;
   const portVal   = s.cash + s.cryptoQty * price;
-  const pnlPct    = ((portVal - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100);
+  // Baseline for P&L: for sell regime with an inherited position, the starting value is
+  // cash + (position at regime start). For buy regime, regimeStartCapital holds this.
+  // Fall back to INITIAL_CAPITAL for old states that never set regimeStartCapital.
+  const pnlBaseline = (s.regime === "sell" && s.regimeStartCryptoQty > 0 && s.regimeStartPrice > 0)
+    ? INITIAL_CAPITAL + s.regimeStartCryptoQty * s.regimeStartPrice
+    : (s.regimeStartCapital || INITIAL_CAPITAL);
+  const pnlPct    = ((portVal - pnlBaseline) / pnlBaseline * 100);
   const pnlSign   = pnlPct >= 0 ? "+" : "";
 
   // HODL comparison from regime start
@@ -1215,7 +1223,10 @@ async function sendRegimeOverview() {
       const icon  = s.regime === "buy" ? "☠️" : s.regime === "sell" ? "⭐" : "⏸ ";
       const name  = sym.replace("-USD","").padEnd(5);
       const reg   = s.regime.toUpperCase().padEnd(7);
-      const pnl   = ((val - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100);
+      const ovBaseline = (s.regime === "sell" && s.regimeStartCryptoQty > 0 && s.regimeStartPrice > 0)
+        ? INITIAL_CAPITAL + s.regimeStartCryptoQty * s.regimeStartPrice
+        : (s.regimeStartCapital || INITIAL_CAPITAL);
+      const pnl   = ((val - ovBaseline) / ovBaseline * 100);
       const pnlS  = (pnl >= 0 ? "+" : "") + pnl.toFixed(2) + "%";
       let detail  = "";
       if (s.regime === "buy") {
