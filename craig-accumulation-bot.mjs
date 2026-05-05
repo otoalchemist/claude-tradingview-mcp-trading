@@ -12,9 +12,9 @@
 //
 //   Death cross  → BUY  regime: scale-in  on each bearish BOS / bullish CHOCH
 //   Golden cross → SELL regime: scale-out on each bullish BOS / bearish CHOCH
-//   Buy  ladder  : BTC/ETH/SOL [15,15,15,15]%  LINK [15,15,15,15]%  PEPE [33,33,33,33]%  AKT [33,33,33,33]%
+//   Buy  ladder  : BTC/ETH [15,15,15,15]%  SOL/LINK/PEPE/AKT [60,25,10,5]%
 //                  % of regime-start capital per BOS signal — UNLIMITED slots (slot 4+ repeats last)
-//   Sell ladder  : BTC/ETH/SOL [5,10,20,40]%   LINK [33,33,33,33]%  PEPE [33,33,33,33]%  AKT [5,10,20,40]%
+//   Sell ladder  : BTC/ETH/SOL [3,5,12,60]%  LINK [33,33,33,33]%  PEPE [33,33,33,33]%  AKT [50,25,15,10]%
 //                  % of regime-start crypto qty per BOS signal — UNLIMITED slots
 //   CHOCH        : continues scale (same per-slot %; no all-in)
 //
@@ -81,8 +81,8 @@ const INITIAL_CAPITAL      = 100;
 const EMA_FAST             = 50;
 const EMA_SLOW             = 200;
 const SWING_LB             = 5;
-const BOS_SCALE_PCT_BUY    = [15, 15, 15, 15];  // scale-in:  flat-15  — sweep optimal for BTC/ETH/SOL
-const BOS_SCALE_PCT_SELL   = [5, 10, 20, 40];   // scale-out: back-steep — sweep optimal for BTC/ETH/SOL
+const BOS_SCALE_PCT_BUY    = [15, 15, 15, 15];  // scale-in:  flat-15  — sweep optimal for ETH (both periods)
+const BOS_SCALE_PCT_SELL   = [3,  5, 12, 60];   // scale-out: back-ultra — sweep optimal for BTC/ETH/SOL (both periods)
 const REQUIRE_BOS_BEFORE_CHOCH = true;
 const CHOCH_CONTINUE_SCALE     = true;
 const SCAN_INTERVAL_MS     = 5 * 60 * 1000;   // scan every 5 min
@@ -123,34 +123,46 @@ const QUOTE_SIZE_DECIMALS = {
 // sellLadder (optional): overrides global BOS_SCALE_PCT_SELL for this symbol only.
 // buyLadder  (optional): overrides global BOS_SCALE_PCT_BUY  for this symbol only.
 const SYMBOL_CONFIG = {
+  // BTC: buy=flat-15 (conflicting across periods; flat-15 is safe middle ground)
+  //      sell=back-ultra [3,5,12,60] via global default — #1 in 90d, #1 in 180d
   "BTC-USD": {
     exec:      { gran: "FIFTEEN_MINUTE", secs:  900, bars: 250, label: "15m" },
     regime:    { gran: "ONE_HOUR",       secs: 3600, bars: 600, ms: HOUR_MS,       label: "1h"  },
   },
+  // ETH: buy=flat-15 (optimal both periods), sell=back-ultra via global default (#1 both periods)
   "ETH-USD": {
     exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
     regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 600, ms: THIRTY_MIN_MS, label: "30m" },
   },
+  // SOL: buy=front-60 (#1 in 90d, #1 in 180d), sell=back-ultra via global default (#1 in 90d; 180d prefers back-mild)
   "SOL-USD": {
     exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
     regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 600, ms: THIRTY_MIN_MS,  label: "30m" },
+    buyLadder: [60, 25, 10, 5],   // front-60 — deploy fast; optimal both 90d and 180d
   },
+  // LINK: buy=front-60 (#1 in 180d; 90d=back-ultra, 180d longer so leans front-60)
+  //       sell=flat-33 — confirmed optimal both periods
   "LINK-USD": {
     exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
     regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 600, ms: THIRTY_MIN_MS,  label: "30m" },
-    sellLadder: [33, 33, 33, 33],  // flat-33 — LINK oscillates; uniform distribution beats backloaded
+    buyLadder:  [60, 25, 10,  5],  // front-60 — LINK trends; enter fast while momentum holds
+    sellLadder: [33, 33, 33, 33],  // flat-33 — LINK oscillates; uniform distribution optimal both periods
   },
+  // PEPE: buy=front-60 (#1 both periods, marginal ~1% gain over flat-33)
+  //       sell=flat-33 — confirmed optimal both periods
   "PEPE-USD": {
     exec:   { gran: "FIVE_MINUTE", secs:  300, bars: 300, label: "5m"  },
     regime: { gran: "ONE_HOUR",    secs: 3600, bars: 600, ms: HOUR_MS, label: "1h" },
-    buyLadder:  [33, 33, 33, 33],  // flat-33 — uniform accumulation
-    sellLadder: [33, 33, 33, 33],  // flat-33 — spread sells evenly; beats front-steep in both 90d/180d
+    buyLadder:  [60, 25, 10,  5],  // front-60 — optimal both periods (was flat-33)
+    sellLadder: [33, 33, 33, 33],  // flat-33 — confirmed optimal both periods
   },
+  // AKT: buy=front-60 (#1 both periods, +23.79% gain vs flat-33 in 90d)
+  //      sell=front-50 (#1 in 90d) / front-40 (#1 in 180d) → using front-50 as it wins 90d by larger margin
   "AKT-USD": {
     exec:   { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
     regime: { gran: "FIFTEEN_MINUTE", secs:  900, bars: 600, ms: FIFTEEN_MIN_MS, label: "15m" },
-    buyLadder:  [33, 33, 33, 33],  // flat-33 — conservative uniform accumulation
-    sellLadder: [ 5, 10, 20, 40],  // back-steep — hold for bigger rallies
+    buyLadder:  [60, 25, 10,  5],  // front-60 — deploy fast; AKT moves hard when it moves (+23% vs flat-33)
+    sellLadder: [50, 25, 15, 10],  // front-50 — take profits early; front-loaded beats back-steep by >20%
   },
 };
 
@@ -841,7 +853,7 @@ async function processSymbol(symbol) {
     // ── BUY regime ────────────────────────────────────────────────────────────
     if (state.regime === "buy") {
 
-      // Scaled BOS buy — UNLIMITED: no slot cap; slots 5+ repeat at 27%
+      // Scaled BOS buy — UNLIMITED: no slot cap; slots 5+ repeat the last ladder value
       if (bearBOS && state.cash >= MIN_ORDER_USD) {
         const buyUSD = Math.min((state.regimeStartCapital * buySlot(state.bosCount)) / 100, state.cash);
         if (buyUSD >= MIN_ORDER_USD) {
@@ -864,7 +876,7 @@ async function processSymbol(symbol) {
         }
       }
 
-      // CHOCH buy — continues scale; slots 5+ repeat at 27%
+      // CHOCH buy — continues scale; slots 5+ repeat the last ladder value
       const chochBuyArmed = !REQUIRE_BOS_BEFORE_CHOCH || state.bosCount >= 1;
       if (CHOCH_CONTINUE_SCALE && bullCHOCH && chochBuyArmed && state.cash >= MIN_ORDER_USD) {
         const buyUSD = Math.min((state.regimeStartCapital * buySlot(state.bosCount)) / 100, state.cash);
@@ -892,7 +904,7 @@ async function processSymbol(symbol) {
     // ── SELL regime ───────────────────────────────────────────────────────────
     if (state.regime === "sell") {
 
-      // Scaled BOS sell — UNLIMITED: no slot cap; slots 5+ repeat at 27%
+      // Scaled BOS sell — UNLIMITED: no slot cap; slots 5+ repeat the last ladder value
       if (bullBOS && state.cryptoQty >= MIN_ORDER_QTY) {
         const sellQty = Math.min((state.regimeStartCryptoQty * sellSlot(state.bosCount)) / 100, state.cryptoQty);
         if (sellQty >= MIN_ORDER_QTY) {
@@ -915,7 +927,7 @@ async function processSymbol(symbol) {
         }
       }
 
-      // CHOCH sell — continues scale; slots 5+ repeat at 27%
+      // CHOCH sell — continues scale; slots 5+ repeat the last ladder value
       const chochSellArmed = !REQUIRE_BOS_BEFORE_CHOCH || state.bosCount >= 1;
       if (CHOCH_CONTINUE_SCALE && bearCHOCH && chochSellArmed && state.cryptoQty >= MIN_ORDER_QTY) {
         const sellQty = Math.min((state.regimeStartCryptoQty * sellSlot(state.bosCount)) / 100, state.cryptoQty);

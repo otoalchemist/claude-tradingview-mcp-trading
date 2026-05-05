@@ -171,15 +171,16 @@ if sellSignal
 
 // --- INFO TABLE --------------------------------------------------------------
 // Ladder reference (matches SYMBOL_CONFIG in craig-accumulation-bot.mjs):
-//   BTC/ETH/SOL  buy: 15·15·15·15  sell: 5·10·20·40
-//   LINK         buy: 15·15·15·15  sell: 33·33·33·33
-//   PEPE         buy: 33·33·33·33  sell: 33·33·33·33
-//   AKT          buy: 33·33·33·33  sell:  5·10·20·40
-i_sym = input.string("BTC/ETH/SOL", "Symbol (for ladder display)",
-          options=["BTC/ETH/SOL", "LINK", "PEPE", "AKT"])
+//   BTC/ETH  buy: 15·15·15·15  sell: 3·5·12·60  (back-ultra)
+//   SOL      buy: 60·25·10·5   sell: 3·5·12·60  (front-60 / back-ultra)
+//   LINK     buy: 60·25·10·5   sell: 33·33·33·33 (front-60 / flat-33)
+//   PEPE     buy: 60·25·10·5   sell: 33·33·33·33 (front-60 / flat-33)
+//   AKT      buy: 60·25·10·5   sell: 50·25·15·10 (front-60 / front-50)
+i_sym = input.string("BTC/ETH", "Symbol (for ladder display)",
+          options=["BTC/ETH", "SOL", "LINK", "PEPE", "AKT"])
 
-f_buyLadder(s)  => s == "LINK" ? "15·15·15·15" : s == "PEPE" ? "33·33·33·33" : s == "AKT" ? "33·33·33·33" : "15·15·15·15"
-f_sellLadder(s) => s == "LINK" ? "33·33·33·33" : s == "PEPE" ? "33·33·33·33" : s == "AKT" ?  "5·10·20·40" :  "5·10·20·40"
+f_buyLadder(s)  => s == "BTC/ETH" ? "15·15·15·15" : "60·25·10·5"
+f_sellLadder(s) => s == "BTC/ETH" ? "3·5·12·60" : s == "AKT" ? "50·25·15·10" : "33·33·33·33"
 
 var table tbl = table.new(position.top_right, 2, 9, bgcolor=color.new(color.black, 75), border_width=1, border_color=color.new(color.gray, 60))
 
