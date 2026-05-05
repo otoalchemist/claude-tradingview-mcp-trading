@@ -61,6 +61,24 @@ bgcolor(i_showBG and regime == "sell" ? color.new(color.red,   92) : na, title="
 plotshape(goldenCross, "Golden Cross (SELL)", shape.labeldown, location.abovebar, color=color.rgb(255, 215, 0), text="SELL", textcolor=color.black, size=size.small)
 plotshape(deathCross,  "Death Cross  (BUY)",  shape.labelup,   location.belowbar, color=color.new(color.purple, 0), text="BUY", textcolor=color.white, size=size.small)
 
+// --- REGIME CHANGE RESET -----------------------------------------------------
+// MUST run before pivot detection and BOS detection so the reset takes effect
+// on the same bar the cross fires.  Matches the bot:
+//   state.structure = 0; state.lastSH = null; state.lastSL = null; state.bosCount = 0;
+//
+// lastCrossBar tracks which bar the cross happened on so we can reject pivot
+// confirmations whose *origin bar* predates the cross.  ta.pivothigh confirms a
+// pivot 5 bars late, so without this filter the first 5 bars after a cross would
+// re-populate lastSH/lastSL with pre-cross pivot levels — same stale data problem.
+var int structure  = 0
+var int bosCount   = 0
+var int lastCrossBar = -999   // bar_index of the most recent regime change
+
+if goldenCross or deathCross
+    lastCrossBar := bar_index
+    structure    := 0
+    bosCount     := 0
+
 // --- SWING HIGHS / LOWS ------------------------------------------------------
 // offset requires const int - hardcoded to -5 to match default Swing Lookback
 pivotH = ta.pivothigh(high, i_swingLB, i_swingLB)
@@ -69,10 +87,19 @@ pivotL = ta.pivotlow(low,  i_swingLB, i_swingLB)
 var float lastSH = na
 var float lastSL = na
 
-if not na(pivotH)
+// Only accept pivots whose origin bar (bar_index - swingLB) is at or after the
+// last cross bar.  Pivots from before the cross use stale price levels.
+pivotOriginBar = bar_index - i_swingLB
+if not na(pivotH) and pivotOriginBar >= lastCrossBar
     lastSH := pivotH
-if not na(pivotL)
+if not na(pivotL) and pivotOriginBar >= lastCrossBar
     lastSL := pivotL
+
+// On a cross bar itself, reset lastSH/lastSL AFTER pivot check so the pivot
+// filter above can still reject any pivot whose origin predates the cross.
+if goldenCross or deathCross
+    lastSH := na
+    lastSL := na
 
 plotshape(i_showSwings and not na(pivotH), "Swing High", shape.circle, location.abovebar, color.new(color.red,  20), size=size.tiny, offset=-5)
 plotshape(i_showSwings and not na(pivotL), "Swing Low",  shape.circle, location.belowbar, color.new(color.lime, 20), size=size.tiny, offset=-5)
@@ -80,7 +107,6 @@ plotshape(i_showSwings and not na(pivotL), "Swing Low",  shape.circle, location.
 // --- BOS / CHOCH DETECTION ---------------------------------------------------
 // close > lastSH and was <= lastSH -> structure -1 -> bullCHOCH, else bullBOS -> structure = 1
 // close < lastSL and was >= lastSL -> structure  1 -> bearCHOCH, else bearBOS -> structure = -1
-var int  structure = 0
 
 var bool bullBOS   = false
 var bool bearBOS   = false
@@ -117,17 +143,6 @@ if i_showBOSlbl
         label.new(bar_index, lastSL, "CHOCH dn", color=color.new(color.red, 10), textcolor=color.white, style=label.style_label_down, size=size.small)
 
 // --- TRADE SIGNAL DETECTION --------------------------------------------------
-// bosCount, structure, and pivots all reset on regime change — matches the bot:
-//   state.bosCount = 0; state.structure = 0; state.lastSH = null; state.lastSL = null;
-// Without this reset, stale structure from the old regime causes the first break
-// in the new regime to be classified as CHOCH instead of BOS, silently dropping
-// the signal (e.g. bullCHOCH in sell regime is not a sell signal).
-var int bosCount = 0
-if goldenCross or deathCross
-    bosCount  := 0
-    structure := 0
-    lastSH    := na
-    lastSL    := na
 
 chochArmed = not i_reqBOS or bosCount >= 1
 
