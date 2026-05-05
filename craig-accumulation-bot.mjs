@@ -12,9 +12,9 @@
 //
 //   Death cross  → BUY  regime: scale-in  on each bearish BOS / bullish CHOCH
 //   Golden cross → SELL regime: scale-out on each bullish BOS / bearish CHOCH
-//   Buy  ladder  : BTC/ETH [15,15,15,15]%  SOL/LINK/PEPE/AKT [60,25,10,5]%
+//   Buy  ladder  : BTC/ETH/SOL [15,15,15,15]%  LINK [15,15,15,15]%  PEPE [60,25,10,5]%  AKT [60,25,10,5]%
 //                  % of regime-start capital per BOS signal — UNLIMITED slots (slot 4+ repeats last)
-//   Sell ladder  : BTC/ETH/SOL [3,5,12,60]%  LINK [33,33,33,33]%  PEPE [33,33,33,33]%  AKT [50,25,15,10]%
+//   Sell ladder  : BTC/ETH/SOL [5,10,20,40]%  LINK [33,33,33,33]%  PEPE [33,33,33,33]%  AKT [50,25,15,10]%
 //                  % of regime-start crypto qty per BOS signal — UNLIMITED slots
 //   CHOCH        : continues scale (same per-slot %; no all-in)
 //
@@ -81,8 +81,8 @@ const INITIAL_CAPITAL      = 100;
 const EMA_FAST             = 50;
 const EMA_SLOW             = 200;
 const SWING_LB             = 5;
-const BOS_SCALE_PCT_BUY    = [15, 15, 15, 15];  // scale-in:  flat-15  — sweep optimal for ETH (both periods)
-const BOS_SCALE_PCT_SELL   = [3,  5, 12, 60];   // scale-out: back-ultra — sweep optimal for BTC/ETH/SOL (both periods)
+const BOS_SCALE_PCT_BUY    = [15, 15, 15, 15];  // scale-in:  flat-15
+const BOS_SCALE_PCT_SELL   = [ 5, 10, 20, 40];  // scale-out: back-steep — BTC/ETH/SOL default
 const REQUIRE_BOS_BEFORE_CHOCH = true;
 const CHOCH_CONTINUE_SCALE     = true;
 const SCAN_INTERVAL_MS     = 5 * 60 * 1000;   // scan every 5 min
@@ -123,30 +123,22 @@ const QUOTE_SIZE_DECIMALS = {
 // sellLadder (optional): overrides global BOS_SCALE_PCT_SELL for this symbol only.
 // buyLadder  (optional): overrides global BOS_SCALE_PCT_BUY  for this symbol only.
 const SYMBOL_CONFIG = {
-  // BTC: buy=flat-15 (conflicting across periods; flat-15 is safe middle ground)
-  //      sell=back-ultra [3,5,12,60] via global default — #1 in 90d, #1 in 180d
   "BTC-USD": {
     exec:      { gran: "FIFTEEN_MINUTE", secs:  900, bars: 250, label: "15m" },
     regime:    { gran: "ONE_HOUR",       secs: 3600, bars: 600, ms: HOUR_MS,       label: "1h"  },
   },
-  // ETH: buy=flat-15 (optimal both periods), sell=back-ultra via global default (#1 both periods)
   "ETH-USD": {
     exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
     regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 600, ms: THIRTY_MIN_MS, label: "30m" },
   },
-  // SOL: buy=front-60 (#1 in 90d, #1 in 180d), sell=back-ultra via global default (#1 in 90d; 180d prefers back-mild)
   "SOL-USD": {
     exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
     regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 600, ms: THIRTY_MIN_MS,  label: "30m" },
-    buyLadder: [60, 25, 10, 5],   // front-60 — deploy fast; optimal both 90d and 180d
   },
-  // LINK: buy=front-60 (#1 in 180d; 90d=back-ultra, 180d longer so leans front-60)
-  //       sell=flat-33 — confirmed optimal both periods
   "LINK-USD": {
     exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
     regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 600, ms: THIRTY_MIN_MS,  label: "30m" },
-    buyLadder:  [60, 25, 10,  5],  // front-60 — LINK trends; enter fast while momentum holds
-    sellLadder: [33, 33, 33, 33],  // flat-33 — LINK oscillates; uniform distribution optimal both periods
+    sellLadder: [33, 33, 33, 33],  // flat-33 — LINK oscillates; uniform distribution beats backloaded
   },
   // PEPE: buy=front-60 (#1 both periods, marginal ~1% gain over flat-33)
   //       sell=flat-33 — confirmed optimal both periods
