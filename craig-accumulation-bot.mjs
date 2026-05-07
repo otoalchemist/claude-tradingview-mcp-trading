@@ -18,7 +18,7 @@
 //                  % of regime-start crypto qty per BOS signal — UNLIMITED slots
 //   CHOCH        : continues scale (same per-slot %; no all-in)
 //
-// REPORTS  : 6-hour check-in (00, 06, 12, 18 UTC) + EOD at 23:55 UTC via Telegram
+// REPORTS  : 6-hour check-in + EOD at 23:55  (Pacific Time)  via Telegram
 // COMMANDS : /status  /report  /trades  /help  (reply in Telegram chat)
 // STATE    : craig-state-{SYMBOL}.json  (saved after every bar for crash safety)
 // TRADES   : craig-accum-trades.jsonl   (append-only trade log)
@@ -68,6 +68,25 @@ function acquireInstanceLock() {
   process.once("SIGINT",  () => { cleanup(); process.exit(0); });
   return { duplicate: false };
 }
+
+// ── Pacific Time display helpers ──────────────────────────────────────────────
+// All user-visible timestamps use America/Los_Angeles (auto PST/PDT).
+// Internal scheduling logic (hourUTC, minuteUTC) stays on UTC deliberately.
+const PT_ZONE = "America/Los_Angeles";
+const ptDate = (d = new Date()) =>
+  new Intl.DateTimeFormat("sv-SE", { timeZone: PT_ZONE, dateStyle: "short" }).format(d);
+const ptTime = (d = new Date(), secs = false) => {
+  const p = new Intl.DateTimeFormat("en-US", {
+    timeZone: PT_ZONE, hour: "2-digit", minute: "2-digit",
+    ...(secs && { second: "2-digit" }), hourCycle: "h23",
+  }).formatToParts(d);
+  const g = t => p.find(x => x.type === t)?.value ?? "00";
+  return secs ? `${g("hour")}:${g("minute")}:${g("second")}` : `${g("hour")}:${g("minute")}`;
+};
+const ptZone = (d = new Date()) =>
+  new Intl.DateTimeFormat("en-US", { timeZone: PT_ZONE, timeZoneName: "short" })
+    .formatToParts(d).find(x => x.type === "timeZoneName")?.value ?? "PT";
+const ptStr  = (d = new Date(), secs = false) => `${ptDate(d)} ${ptTime(d, secs)} ${ptZone(d)}`;
 
 // ── Time constants ────────────────────────────────────────────────────────────
 const HOUR_MS        = 3_600_000;
@@ -767,7 +786,7 @@ async function processSymbol(symbol) {
     state.initialized       = true;
     saveState(symbol, state);
 
-    const now = new Date().toISOString().slice(0, 16);
+    const now = ptStr();
     console.log(`[${symbol}] ✓ Init | regime=${state.regime} | $${state.cash.toFixed(2)} | exec:${cfg.exec.label} regime:${cfg.regime.label} | ${now}`);
     await sendTelegram(
       `🤖 <b>Craig Accum Bot — ${symbol}</b>\n` +
@@ -782,7 +801,7 @@ async function processSymbol(symbol) {
   // ── Process bars newer than last processed ────────────────────────────────
   const newBars = candlesExec.filter(b => b.t > state.lastProcessedBarT);
   if (!newBars.length) {
-    console.log(`[${symbol}] No new ${cfg.exec.label} bars since ${new Date(state.lastProcessedBarT).toISOString().slice(11, 16)} UTC`);
+    console.log(`[${symbol}] No new ${cfg.exec.label} bars since ${ptTime(new Date(state.lastProcessedBarT))} ${ptZone()}`);
     return;
   }
 
@@ -876,7 +895,7 @@ async function processSymbol(symbol) {
     }
 
     // ── 4. Trade execution ───────────────────────────────────────────────────
-    const dateStr = new Date(bar.t).toISOString().slice(0, 16).replace("T", " ");
+    const dateStr = ptStr(new Date(bar.t));
 
     // Allocation % — use per-symbol override if present, else fall back to global ladder
     const symBuyLadder  = cfg.buyLadder  ?? BOS_SCALE_PCT_BUY;
@@ -1096,12 +1115,12 @@ function buildSymbolReport(symbol) {
   }
 
   // Today's trades
-  const todayDate = new Date().toISOString().slice(0, 10);
-  const todayTrades = s.trades.filter(t => t.ts?.startsWith(todayDate));
+  const todayDate = ptDate();
+  const todayTrades = s.trades.filter(t => t.ts && ptDate(new Date(t.ts)) === todayDate);
 
   // Last 2 trades
   const recentLines = s.trades.slice(-2).map(t => {
-    const dt   = new Date(t.t).toISOString().slice(5, 16).replace("T", " ");
+    const dt   = `${ptDate(new Date(t.t)).slice(5)} ${ptTime(new Date(t.t))}`;
     const icon = t.type.includes("buy") ? "🟢" : "🔴";
     const tag  = t.type === "scaled_buy"   ? `BUY  #${t.bosNum}  (BOS)`
                : t.type === "choch_buy"    ? `BUY  #${t.bosNum}  (CHOCH)`
@@ -1143,7 +1162,7 @@ function buildSymbolReport(symbol) {
 
 async function sendPortfolioReport(isEod = false) {
   const now     = new Date();
-  const timeStr = now.toISOString().slice(0, 16).replace("T", " ") + " UTC";
+  const timeStr = ptStr(now);
 
   let totalPortVal = 0;
   const symbolBlocks = [];
@@ -1165,7 +1184,7 @@ async function sendPortfolioReport(isEod = false) {
   const totalSign   = totalPnlPct >= 0 ? "+" : "";
 
   const header = isEod
-    ? `📊 <b>END OF DAY  ─  ${now.toISOString().slice(0, 10)}</b>\n${timeStr}`
+    ? `📊 <b>END OF DAY  ─  ${ptDate(now)}</b>\n${timeStr}`
     : `📈 <b>6H CHECK-IN  ─  ${timeStr}</b>`;
 
   const footer =
@@ -1201,7 +1220,7 @@ async function checkAndSendReports() {
 
 // ── Telegram command: today's trades list ────────────────────────────────────
 async function sendTodaysTrades() {
-  const todayDate = new Date().toISOString().slice(0, 10);
+  const todayDate = ptDate();
   const lines     = [];
   let   totalCount = 0;
 
@@ -1212,14 +1231,14 @@ async function sendTodaysTrades() {
       totalCount  += today.length;
       if (!today.length) { lines.push(`<b>${symbol}</b> — no trades today`); continue; }
       const rows = today.map(t => {
-        const dt   = new Date(t.t).toISOString().slice(11, 16);
+        const dt   = ptTime(new Date(t.t));
         const icon = t.type.includes("buy") ? "🟢" : "🔴";
         const side = t.type === "scaled_buy"  ? `BUY  #${t.bosNum} BOS`
                    : t.type === "choch_buy"   ? `BUY  #${t.bosNum} CHOCH`
                    : t.type === "scaled_sell" ? `SELL #${t.bosNum} BOS`
                    : t.type === "choch_sell"  ? `SELL #${t.bosNum} CHOCH`
                    : t.type;
-        return `  ${icon} ${side.padEnd(16)} ${fPrice(t.price).padStart(14)}  ${dt} UTC`;
+        return `  ${icon} ${side.padEnd(16)} ${fPrice(t.price).padStart(14)}  ${dt} ${ptZone(new Date(t.t))}`;
       });
       lines.push(`<b>${symbol}</b>  (${today.length} trade${today.length !== 1 ? "s" : ""})\n<code>${rows.join("\n")}</code>`);
     } catch {
@@ -1242,11 +1261,11 @@ async function sendPing() {
   const uptime = h > 0 ? `${h}h ${m}m ${s}s` : m > 0 ? `${m}m ${s}s` : `${s}s`;
 
   const lastStr = lastScanTime
-    ? `${new Date(lastScanTime).toISOString().slice(11, 19)} UTC  (${(lastScanMs / 1000).toFixed(1)}s)`
+    ? `${ptTime(new Date(lastScanTime), true)} ${ptZone(new Date(lastScanTime))}  (${(lastScanMs / 1000).toFixed(1)}s)`
     : "not yet";
   const nextMs  = lastScanTime
     ? Math.ceil(lastScanTime / SCAN_INTERVAL_MS) * SCAN_INTERVAL_MS : null;
-  const nextStr = nextMs ? new Date(nextMs).toISOString().slice(11, 16) + " UTC" : "soon";
+  const nextStr = nextMs ? `${ptTime(new Date(nextMs))} ${ptZone(new Date(nextMs))}` : "soon";
 
   await sendTelegram(
     `🏓 <b>Pong — Bot is alive</b>\n\n` +
@@ -1274,7 +1293,7 @@ async function sendPrices() {
       return `${icon} ${name} ${price}  [${reg}]  ${cfg.exec.label}/${cfg.regime.label}`;
     } catch { return `❌ ${sym}  error`; }
   });
-  const t = new Date().toISOString().slice(11, 19) + " UTC";
+  const t = `${ptTime(new Date(), true)} ${ptZone()}`;
   await sendTelegram(`💰 <b>PRICES  ─  ${t}</b>\n\n<code>${lines.join("\n")}</code>`);
 }
 
@@ -1314,7 +1333,7 @@ async function sendRegimeOverview() {
   }
   const totalStart = SYMBOLS.length * INITIAL_CAPITAL;
   const totalPnl   = ((totalVal - totalStart) / totalStart * 100);
-  const t = new Date().toISOString().slice(11, 19) + " UTC";
+  const t = `${ptTime(new Date(), true)} ${ptZone()}`;
   await sendTelegram(
     `📡 <b>REGIME OVERVIEW  ─  ${t}</b>\n\n` +
     `<code>${lines.join("\n")}</code>\n\n` +
@@ -1338,7 +1357,7 @@ async function sendTradeHistory() {
     return;
   }
   const rows = recent.map(t => {
-    const dt   = new Date(t.t).toISOString().slice(5, 16).replace("T", " ");
+    const dt   = `${ptDate(new Date(t.t)).slice(5)} ${ptTime(new Date(t.t))}`;
     const sym  = t.symbol.replace("-USD","").padEnd(5);
     const icon = t.type.includes("buy") ? "🟢" : "🔴";
     const side = t.type === "scaled_buy"  ? `B#${t.bosNum} BOS  `
@@ -1447,7 +1466,7 @@ async function sendHelpMessage() {
     `AKT: 15m regime / 5m exec\n` +
     `Buy:  BTC/ETH/SOL=[${BOS_SCALE_PCT_BUY.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
     `Sell: BTC/ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%\n\n` +
-    `⏰ Auto-reports: 00/06/12/18 UTC  +  EOD 23:55 UTC`
+    `⏰ Auto-reports: every 6h + EOD  (Pacific Time)`
   );
 }
 
@@ -1696,7 +1715,7 @@ async function startTelegramPoller() {
 function printStatus() {
   const sep = "─".repeat(76);
   console.log(`\n${sep}`);
-  console.log(`  ${new Date().toISOString().slice(0, 19)} UTC  │  Craig Accum Bot v2  │  ${LIVE_TRADING ? "LIVE TRADING" : "Paper Trading"}`);
+  console.log(`  ${ptStr(new Date(), true)}  │  Craig Accum Bot v2  │  ${LIVE_TRADING ? "LIVE TRADING" : "Paper Trading"}`);
   console.log(sep);
   console.log(`  ${"Symbol".padEnd(10)} ${"Regime".padEnd(8)} ${"Cash".padStart(10)} ${"Crypto".padStart(14)} ${"Sigs".padStart(6)} ${"Trades".padStart(8)}  Regimes`);
   console.log(`  ${"-".repeat(70)}`);
@@ -1734,7 +1753,7 @@ async function runCycle(manual = false) {
   scanInProgress = true;
   const start = Date.now();
   const label = manual ? "manual" : "scheduled";
-  console.log(`\n⏱  Scanning ${SYMBOLS.length} symbols @ ${new Date().toISOString().slice(0, 19)} UTC  [${label}]`);
+  console.log(`\n⏱  Scanning ${SYMBOLS.length} symbols @ ${ptStr(new Date(), true)}  [${label}]`);
 
   try {
     for (const symbol of SYMBOLS) {
@@ -1867,7 +1886,7 @@ async function main() {
     console.log(`  ${sym.padEnd(9)}  exec: ${c.exec.label.padEnd(4)}  regime: ${c.regime.label.padEnd(4)}  EMA${EMA_FAST}/${EMA_SLOW}  buy:[${buy}]%  sell:[${sell}]%`);
   }
   console.log(`  Buy (default) : [${BOS_SCALE_PCT_BUY.join(", ")}]%  │  Sell (default): [${BOS_SCALE_PCT_SELL.join(", ")}]%  │  UNLIMITED slots`);
-  console.log(`  Reports : 6h check-in (00/06/12/18 UTC)  +  EOD at 23:55 UTC`);
+  console.log(`  Reports : every 6h + EOD  (Pacific Time)`);
   console.log(`  Commands: /ping /price /status /report /trades /hist /scan /btc /eth /sol /link /pepe /akt /help`);
   console.log(`  Capital : $${INITIAL_CAPITAL}/symbol  │  Scan: every 5 min`);
   console.log("═".repeat(66) + "\n");
@@ -1881,7 +1900,7 @@ async function main() {
     `AKT: 15m regime / 5m exec\n` +
     `Buy:  BTC/ETH/SOL=[${BOS_SCALE_PCT_BUY.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
     `Sell: BTC/ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%\n` +
-    `Reports: every 6h + EOD at 23:55 UTC\n` +
+    `Reports: every 6h + EOD  (Pacific Time)\n` +
     `Commands: /ping /price /status /report /trades /hist /scan\n` +
     `Per symbol: /btc /eth /sol /link /pepe /akt  |  /help for full list\n` +
     `Capital: $${INITIAL_CAPITAL}/symbol  │  ${modeLabelTg}\n\n` +
