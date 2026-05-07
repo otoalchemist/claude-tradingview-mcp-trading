@@ -989,11 +989,13 @@ function buildSymbolReport(symbol) {
   const cfg       = SYMBOL_CONFIG[symbol];
   const price     = s.lastPrice || 0;
   const portVal   = s.cash + s.cryptoQty * price;
-  // Baseline for P&L: for sell regime with an inherited position, the starting value is
-  // cash + (position at regime start). For buy regime, regimeStartCapital holds this.
+  // P&L baseline: for inherited positions (preExistingCryptoQty > 0, e.g. LINK set via
+  // /setregimeqty), the bot's capital allocation is simply INITIAL_CAPITAL — the crypto was
+  // already on the exchange and was never purchased out of the bot's $100 cash.
+  // For all other symbols, use regimeStartCapital (portfolio value recorded at regime start).
   // Fall back to INITIAL_CAPITAL for old states that never set regimeStartCapital.
-  const pnlBaseline = (s.regime === "sell" && s.regimeStartCryptoQty > 0 && s.regimeStartPrice > 0)
-    ? INITIAL_CAPITAL + s.regimeStartCryptoQty * s.regimeStartPrice
+  const pnlBaseline = (s.preExistingCryptoQty > 0)
+    ? INITIAL_CAPITAL
     : (s.regimeStartCapital || INITIAL_CAPITAL);
   const pnlPct    = ((portVal - pnlBaseline) / pnlBaseline * 100);
   const pnlSign   = pnlPct >= 0 ? "+" : "";
@@ -1227,8 +1229,8 @@ async function sendRegimeOverview() {
       const icon  = s.regime === "buy" ? "☠️" : s.regime === "sell" ? "⭐" : "⏸ ";
       const name  = sym.replace("-USD","").padEnd(5);
       const reg   = s.regime.toUpperCase().padEnd(7);
-      const ovBaseline = (s.regime === "sell" && s.regimeStartCryptoQty > 0 && s.regimeStartPrice > 0)
-        ? INITIAL_CAPITAL + s.regimeStartCryptoQty * s.regimeStartPrice
+      const ovBaseline = (s.preExistingCryptoQty > 0)
+        ? INITIAL_CAPITAL
         : (s.regimeStartCapital || INITIAL_CAPITAL);
       const pnl   = ((val - ovBaseline) / ovBaseline * 100);
       const pnlS  = (pnl >= 0 ? "+" : "") + pnl.toFixed(2) + "%";
