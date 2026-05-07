@@ -7,7 +7,7 @@
 //   ETH-USD  : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
 //   SOL-USD  : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
 //   LINK-USD : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
-//   PEPE-USD :  1h EMA50/200 regime  →   5m BOS/CHOCH execution
+//   PEPE-USD :  1h EMA50/200 regime  →   5m BOS/CHOCH execution  [TREND-FOLLOWING + BTC gate]
 //   AKT-USD  : 15m EMA50/200 regime  →   5m BOS/CHOCH execution
 //
 //   Death cross  → BUY  regime: scale-in  on each bearish BOS / bullish CHOCH
@@ -140,13 +140,18 @@ const SYMBOL_CONFIG = {
     regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 600, ms: THIRTY_MIN_MS,  label: "30m" },
     sellLadder: [33, 33, 33, 33],  // flat-33 — LINK oscillates; uniform distribution beats backloaded
   },
-  // PEPE: buy=front-60 (#1 both periods, marginal ~1% gain over flat-33)
-  //       sell=flat-33 — confirmed optimal both periods
+  // PEPE: trend-following (not contrarian) — meme coins ride narrative supercycles
+  //   golden cross → BUY  (ride the pump),  death cross → SELL (exit the dump)
+  //   BTC gate: buy signals suppressed when BTC EMA50 < EMA200 (crypto bear market)
+  //   buy=front-60 — fast deployment when narrative ignites
+  //   sell=flat-33 — confirmed optimal both periods
   "PEPE-USD": {
-    exec:   { gran: "FIVE_MINUTE", secs:  300, bars: 300, label: "5m"  },
-    regime: { gran: "ONE_HOUR",    secs: 3600, bars: 600, ms: HOUR_MS, label: "1h" },
-    buyLadder:  [60, 25, 10,  5],  // front-60 — optimal both periods (was flat-33)
-    sellLadder: [33, 33, 33, 33],  // flat-33 — confirmed optimal both periods
+    exec:           { gran: "FIVE_MINUTE", secs:  300, bars: 300, label: "5m"  },
+    regime:         { gran: "ONE_HOUR",    secs: 3600, bars: 600, ms: HOUR_MS, label: "1h" },
+    buyLadder:      [60, 25, 10,  5],  // front-60 — deploy fast when narrative ignites
+    sellLadder:     [33, 33, 33, 33],  // flat-33 — confirmed optimal both periods
+    trendFollowing: true,              // golden=BUY, death=SELL (opposite of contrarian)
+    btcGate:        true,              // only buy when BTC EMA50 > EMA200 (crypto bull market)
   },
   // AKT: buy=front-60 (#1 both periods, +23.79% gain vs flat-33 in 90d)
   //      sell=front-50 (#1 in 90d) / front-40 (#1 in 180d) → using front-50 as it wins 90d by larger margin
@@ -803,9 +808,15 @@ async function processSymbol(symbol) {
 
     // ── 3. Regime change check ────────────────────────────────────────────────
     // Checked at each regime-candle boundary (every 1h for BTC/PEPE; every 30m for ETH/SOL/LINK; every 15m for AKT)
+    //
+    // trendFollowing symbols (PEPE): golden cross → BUY (ride the pump), death cross → SELL (exit the dump)
+    // contrarian symbols (all others): death cross → BUY (accumulate dip), golden cross → SELL (distribute rally)
     if (bar.t % cfg.regime.ms === 0) {
       const cross = crossMap.get(bar.t);
-      if (cross === "death" && state.regime !== "buy") {
+      const buyOnCross  = cfg.trendFollowing ? "golden" : "death";
+      const sellOnCross = cfg.trendFollowing ? "death"  : "golden";
+
+      if (cross === buyOnCross && state.regime !== "buy") {
         state.regime             = "buy";
         state.bosCount           = 0;
         state.regimeStartCapital = state.cash + state.cryptoQty * bar.c;
@@ -813,11 +824,13 @@ async function processSymbol(symbol) {
         state.regimeCount.buy++;
         // Reset structure tracking so stale pivots from the old regime don't fire false signals
         state.structure = 0; state.lastSH = null; state.lastSL = null;
-        const msg = `☠️ <b>${symbol}</b> DEATH CROSS → BUY REGIME\n@ ${fP(bar.c)} | Capital: $${f2(state.regimeStartCapital)}`;
-        console.log(`[${symbol}] DEATH CROSS → BUY @ ${fP(bar.c)} | capital $${f2(state.regimeStartCapital)}`);
+        const crossLabel = cfg.trendFollowing ? "GOLDEN CROSS → TREND BUY" : "DEATH CROSS → BUY";
+        const crossEmoji = cfg.trendFollowing ? "🚀" : "☠️";
+        const msg = `${crossEmoji} <b>${symbol}</b> ${crossLabel} REGIME\n@ ${fP(bar.c)} | Capital: $${f2(state.regimeStartCapital)}`;
+        console.log(`[${symbol}] ${crossLabel} REGIME @ ${fP(bar.c)} | capital $${f2(state.regimeStartCapital)}`);
         alerts.push(msg);
         appendTrade({ symbol, t: bar.t, type: "regime", to: "buy",  price: bar.c, ts: new Date(bar.t).toISOString() });
-      } else if (cross === "golden" && state.regime !== "sell") {
+      } else if (cross === sellOnCross && state.regime !== "sell") {
         state.regime                = "sell";
         state.bosCount              = 0;
         state.regimeStartCryptoQty  = state.cryptoQty;
@@ -826,8 +839,10 @@ async function processSymbol(symbol) {
         state.regimeCount.sell++;
         // Reset structure tracking so stale pivots from the old regime don't fire false signals
         state.structure = 0; state.lastSH = null; state.lastSL = null;
-        const msg = `⭐ <b>${symbol}</b> GOLDEN CROSS → SELL REGIME\n@ ${fP(bar.c)} | Crypto: ${fQ(state.regimeStartCryptoQty)}`;
-        console.log(`[${symbol}] GOLDEN CROSS → SELL @ ${fP(bar.c)} | qty ${fQ(state.regimeStartCryptoQty)}`);
+        const crossLabel = cfg.trendFollowing ? "DEATH CROSS → TREND SELL" : "GOLDEN CROSS → SELL";
+        const crossEmoji = cfg.trendFollowing ? "☠️📉" : "⭐";
+        const msg = `${crossEmoji} <b>${symbol}</b> ${crossLabel} REGIME\n@ ${fP(bar.c)} | Crypto: ${fQ(state.regimeStartCryptoQty)}`;
+        console.log(`[${symbol}] ${crossLabel} REGIME @ ${fP(bar.c)} | qty ${fQ(state.regimeStartCryptoQty)}`);
         alerts.push(msg);
         appendTrade({ symbol, t: bar.t, type: "regime", to: "sell", price: bar.c, ts: new Date(bar.t).toISOString() });
       }
@@ -844,9 +859,22 @@ async function processSymbol(symbol) {
 
     // ── BUY regime ────────────────────────────────────────────────────────────
     if (state.regime === "buy") {
+      // trendFollowing: buy bullBOS (breakout above resistance = momentum)
+      // contrarian:     buy bearBOS (break below support  = buy the dip)
+      const bosBuySignal = cfg.trendFollowing ? bullBOS : bearBOS;
+      const bosLabel     = cfg.trendFollowing ? "bullish BOS" : "bearish BOS";
+
+      // BTC gate: only allow buys when BTC EMA50 > EMA200 (crypto bull market).
+      // BTC processes first in SYMBOLS[], so its state is always fresh by the time PEPE runs.
+      // btcState.regime === "sell" → BTC golden cross → EMA50 > EMA200 → gate open.
+      let btcGateOpen = true;
+      if (cfg.btcGate) {
+        const btcState = loadState("BTC-USD");
+        btcGateOpen = btcState.regime === "sell";
+      }
 
       // Scaled BOS buy — UNLIMITED: no slot cap; slots 5+ repeat the last ladder value
-      if (bearBOS && state.cash >= MIN_ORDER_USD) {
+      if (bosBuySignal && btcGateOpen && state.cash >= MIN_ORDER_USD) {
         const buyUSD = Math.min((state.regimeStartCapital * buySlot(state.bosCount)) / 100, state.cash);
         if (buyUSD >= MIN_ORDER_USD) {
           try {
@@ -858,7 +886,7 @@ async function processSymbol(symbol) {
                             price: fill.price, usd: fill.usd, qty: fill.qty, ts: new Date(bar.t).toISOString() };
             state.trades.push(trade);
             appendTrade(trade);
-            const msg = `🟢 <b>${symbol}</b> BUY #${state.bosCount} (bearish BOS)\n@ ${fP(fill.price)} | $${f2(fill.usd)} | ${fQ(fill.qty)}\nCash: $${f2(state.cash)} | ${dateStr}`;
+            const msg = `🟢 <b>${symbol}</b> BUY #${state.bosCount} (${bosLabel})\n@ ${fP(fill.price)} | $${f2(fill.usd)} | ${fQ(fill.qty)}\nCash: $${f2(state.cash)} | ${dateStr}`;
             console.log(`[${symbol}] BUY #${state.bosCount} (BOS) @ ${fP(fill.price)} | $${f2(fill.usd)} | cash $${f2(state.cash)}`);
             alerts.push(msg);
           } catch (e) {
@@ -869,8 +897,9 @@ async function processSymbol(symbol) {
       }
 
       // CHOCH buy — continues scale; slots 5+ repeat the last ladder value
+      // bullCHOCH = structure reverting to uptrend — valid buy for both trend and contrarian
       const chochBuyArmed = !REQUIRE_BOS_BEFORE_CHOCH || state.bosCount >= 1;
-      if (CHOCH_CONTINUE_SCALE && bullCHOCH && chochBuyArmed && state.cash >= MIN_ORDER_USD) {
+      if (CHOCH_CONTINUE_SCALE && bullCHOCH && chochBuyArmed && btcGateOpen && state.cash >= MIN_ORDER_USD) {
         const buyUSD = Math.min((state.regimeStartCapital * buySlot(state.bosCount)) / 100, state.cash);
         if (buyUSD >= MIN_ORDER_USD) {
           try {
@@ -895,9 +924,13 @@ async function processSymbol(symbol) {
 
     // ── SELL regime ───────────────────────────────────────────────────────────
     if (state.regime === "sell") {
+      // trendFollowing: sell bearBOS (breakdown below support = momentum sell)
+      // contrarian:     sell bullBOS (break above resistance = sell into rally)
+      const bosSellSignal = cfg.trendFollowing ? bearBOS : bullBOS;
+      const bosSellLabel  = cfg.trendFollowing ? "bearish BOS" : "bullish BOS";
 
       // Scaled BOS sell — UNLIMITED: no slot cap; slots 5+ repeat the last ladder value
-      if (bullBOS && state.cryptoQty >= MIN_ORDER_QTY) {
+      if (bosSellSignal && state.cryptoQty >= MIN_ORDER_QTY) {
         const sellQty = Math.min((state.regimeStartCryptoQty * sellSlot(state.bosCount)) / 100, state.cryptoQty);
         if (sellQty >= MIN_ORDER_QTY) {
           try {
@@ -909,7 +942,7 @@ async function processSymbol(symbol) {
                             price: fill.price, usd: fill.usd, qty: fill.qty, ts: new Date(bar.t).toISOString() };
             state.trades.push(trade);
             appendTrade(trade);
-            const msg = `🔴 <b>${symbol}</b> SELL #${state.bosCount} (bullish BOS)\n@ ${fP(fill.price)} | $${f2(fill.usd)} | ${fQ(fill.qty)}\nCash: $${f2(state.cash)} | ${dateStr}`;
+            const msg = `🔴 <b>${symbol}</b> SELL #${state.bosCount} (${bosSellLabel})\n@ ${fP(fill.price)} | $${f2(fill.usd)} | ${fQ(fill.qty)}\nCash: $${f2(state.cash)} | ${dateStr}`;
             console.log(`[${symbol}] SELL #${state.bosCount} (BOS) @ ${fP(fill.price)} | $${f2(fill.usd)} | cash $${f2(state.cash)}`);
             alerts.push(msg);
           } catch (e) {
@@ -920,6 +953,7 @@ async function processSymbol(symbol) {
       }
 
       // CHOCH sell — continues scale; slots 5+ repeat the last ladder value
+      // bearCHOCH = structure reverting to downtrend — valid sell for both trend and contrarian
       const chochSellArmed = !REQUIRE_BOS_BEFORE_CHOCH || state.bosCount >= 1;
       if (CHOCH_CONTINUE_SCALE && bearCHOCH && chochSellArmed && state.cryptoQty >= MIN_ORDER_QTY) {
         const sellQty = Math.min((state.regimeStartCryptoQty * sellSlot(state.bosCount)) / 100, state.cryptoQty);
@@ -1380,7 +1414,7 @@ async function sendHelpMessage() {
     `<b>Strategy</b>\n` +
     `BTC: 1h regime / 15m exec\n` +
     `ETH · SOL · LINK: 30m regime / 5m exec\n` +
-    `PEPE: 1h regime / 5m exec\n` +
+    `PEPE: 1h regime / 5m exec  [TREND + BTC gate]\n` +
     `AKT: 15m regime / 5m exec\n` +
     `Buy:  BTC/ETH/SOL=[${BOS_SCALE_PCT_BUY.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
     `Sell: BTC/ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%\n\n` +
@@ -1728,7 +1762,7 @@ async function main() {
     `Instance: <code>${BOT_INSTANCE_ID}</code>\n\n` +
     `BTC: 1h regime / 15m exec\n` +
     `ETH · SOL · LINK: 30m regime / 5m exec\n` +
-    `PEPE: 1h regime / 5m exec\n` +
+    `PEPE: 1h regime / 5m exec  [TREND + BTC gate]\n` +
     `AKT: 15m regime / 5m exec\n` +
     `Buy:  BTC/ETH/SOL=[${BOS_SCALE_PCT_BUY.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
     `Sell: BTC/ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%\n` +

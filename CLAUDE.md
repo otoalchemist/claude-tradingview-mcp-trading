@@ -61,7 +61,7 @@ Coinbase has no native 4h granularity — `aggregateCandles(bars, FOUR_HOUR_MS)`
 |---|---|---|
 | BTC/ETH/SOL | [15,15,15,15] flat | [5,10,20,40] back-steep |
 | LINK | [15,15,15,15] flat (global) | [33,33,33,33] flat |
-| PEPE | [60,25,10,5] front-60 | [33,33,33,33] flat |
+| PEPE | [60,25,10,5] front-60 | [33,33,33,33] flat | **TREND-FOLLOWING** (golden=BUY, death=SELL) + BTC gate |
 | AKT | [60,25,10,5] front-60 | [50,25,15,10] front-50 |
 
 - **Buy ladder**: % of `regimeStartCapital` per BOS signal (slot 4+ repeats the last value — unlimited signals)
