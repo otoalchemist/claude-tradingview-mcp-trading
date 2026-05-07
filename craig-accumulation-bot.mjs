@@ -171,6 +171,7 @@ const SYMBOL_CONFIG = {
     sellLadder:     [33, 33, 33, 33],  // flat-33 — confirmed optimal both periods
     trendFollowing: true,              // golden=BUY, death=SELL (opposite of contrarian)
     btcGate:        true,              // only buy when BTC EMA50 > EMA200 (crypto bull market)
+    useChochGate:   true,             // gate-closed: pause BOS until aligned CHOCH fires
   },
   // AKT: buy=front-60 (#1 both periods, +23.79% gain vs flat-33 in 90d)
   //      sell=front-50 (#1 in 90d) / front-40 (#1 in 180d) → using front-50 as it wins 90d by larger margin
@@ -403,12 +404,22 @@ async function fetchCoinbasePosition(symbol) {
   const currency = symbol.replace("-USD", "");
   const json     = await cbFetch("GET", "/api/v3/brokerage/accounts?limit=250");
   const accounts = json.accounts ?? [];
-  const usdTotal  = accounts
+
+  const usdTotal = accounts
     .filter(a => a.currency === "USD" || a.currency === "USDC")
     .reduce((s, a) => s + parseFloat(a.available_balance?.value ?? 0), 0);
-  const cryptoQty = parseFloat(
-    accounts.find(a => a.currency === currency)?.available_balance?.value ?? "0"
-  );
+
+  // Sum ALL accounts for this currency (Coinbase can have multiple sub-accounts / portfolios).
+  // Include both available_balance AND hold (amounts in open orders) to get the true total
+  // balance — available_balance alone returns 0 when crypto is in a hold or different portfolio.
+  const cryptoQty = accounts
+    .filter(a => a.currency === currency)
+    .reduce((s, a) => {
+      const avail = parseFloat(a.available_balance?.value ?? 0);
+      const hold  = parseFloat(a.hold?.value ?? 0);
+      return s + avail + hold;
+    }, 0);
+
   return { usdTotal, cryptoQty };
 }
 
@@ -568,6 +579,7 @@ function makeFreshState(symbol) {
     lastProcessedBarT:    0,
     trades:               [],
     regimeCount:          { buy: 0, sell: 0 },
+    chochGate:            false,        // false=closed (must see aligned CHOCH before BOS fires)
   };
 }
 
@@ -590,6 +602,7 @@ function loadState(symbol) {
     if (!("regimeStartCryptoQty" in state)) state.regimeStartCryptoQty = 0;
     if (!("tradingPaused"        in state)) state.tradingPaused        = false;
     if (!("regimeCount"          in state)) state.regimeCount          = { buy: 0, sell: 0 };
+    if (!("chochGate"            in state)) state.chochGate            = false;
     if (!("preExistingCryptoQty" in state)) {
       // Migration: derive bot-accumulated qty from trade log; remainder is pre-existing balance.
       // (e.g. if cryptoQty=300 and bot trades show net 50 bought, pre-existing = 250)
@@ -870,6 +883,8 @@ async function processSymbol(symbol) {
         state.regimeCount.buy++;
         // Reset structure tracking so stale pivots from the old regime don't fire false signals
         state.structure = 0; state.lastSH = null; state.lastSL = null;
+        // CHOCH gate: reset to closed on regime start (aligned CHOCH required before first BOS)
+        if (cfg.useChochGate) state.chochGate = false;
         const crossLabel = cfg.trendFollowing ? "GOLDEN CROSS → TREND BUY" : "DEATH CROSS → BUY";
         const crossEmoji = cfg.trendFollowing ? "🚀" : "☠️";
         const msg = `${crossEmoji} <b>${symbol}</b> ${crossLabel} REGIME\n@ ${fP(bar.c)} | Capital: $${f2(state.regimeStartCapital)}`;
@@ -885,6 +900,8 @@ async function processSymbol(symbol) {
         state.regimeCount.sell++;
         // Reset structure tracking so stale pivots from the old regime don't fire false signals
         state.structure = 0; state.lastSH = null; state.lastSL = null;
+        // CHOCH gate: reset to closed on regime start
+        if (cfg.useChochGate) state.chochGate = false;
         const crossLabel = cfg.trendFollowing ? "DEATH CROSS → TREND SELL" : "GOLDEN CROSS → SELL";
         const crossEmoji = cfg.trendFollowing ? "☠️📉" : "⭐";
         const msg = `${crossEmoji} <b>${symbol}</b> ${crossLabel} REGIME\n@ ${fP(bar.c)} | Crypto: ${fQ(state.regimeStartCryptoQty)}`;
@@ -903,6 +920,32 @@ async function processSymbol(symbol) {
     const buySlot  = idx => symBuyLadder [Math.min(idx, symBuyLadder.length  - 1)];
     const sellSlot = idx => symSellLadder[Math.min(idx, symSellLadder.length - 1)];
 
+    // ── CHOCH gate update ─────────────────────────────────────────────────────
+    // Only applies to symbols with cfg.useChochGate (currently PEPE).
+    // Gate update runs BEFORE BOS execution so that on a bar where both CHOCH and BOS
+    // fire simultaneously the gate state is correct when BOS is evaluated.
+    //
+    // Trend-following BUY:  bullCHOCH=aligned (opens gate), bearCHOCH=reverse (closes gate)
+    // Trend-following SELL: bearCHOCH=aligned (opens gate), bullCHOCH=reverse (closes gate)
+    if (cfg.useChochGate) {
+      const wasGated = state.chochGate;
+      if (state.regime === "buy") {
+        if (bullCHOCH) { state.chochGate = true; }   // trend: bull structure confirmed → open
+        if (bearCHOCH) { state.chochGate = false; }  // trend: structure broke down   → close
+      } else if (state.regime === "sell") {
+        if (bearCHOCH) { state.chochGate = true; }   // trend: bear structure confirmed → open
+        if (bullCHOCH) { state.chochGate = false; }  // trend: structure reversed up   → close
+      }
+      if (wasGated !== state.chochGate) {
+        const gateLabel = state.chochGate ? "🔓 CHOCH gate OPEN" : "🔒 CHOCH gate CLOSED";
+        const chochType = state.chochGate
+          ? (state.regime === "buy" ? "bullish CHOCH" : "bearish CHOCH")
+          : (state.regime === "buy" ? "bearish CHOCH" : "bullish CHOCH");
+        console.log(`[${symbol}] ${gateLabel} (${chochType})`);
+        alerts.push(`${state.chochGate ? "🔓" : "🔒"} <b>${symbol}</b> ${gateLabel}\n(${chochType}) @ ${fP(bar.c)}`);
+      }
+    }
+
     // ── BUY regime ────────────────────────────────────────────────────────────
     if (state.regime === "buy") {
       // trendFollowing: buy bullBOS (breakout above resistance = momentum)
@@ -919,8 +962,11 @@ async function processSymbol(symbol) {
         btcGateOpen = btcState.regime === "sell";
       }
 
+      // CHOCH gate: BOS only fires when gate is open (cfg.useChochGate must see aligned CHOCH first)
+      const chochGateOpen = !cfg.useChochGate || state.chochGate;
+
       // Scaled BOS buy — UNLIMITED: no slot cap; slots 5+ repeat the last ladder value
-      if (bosBuySignal && btcGateOpen && state.cash >= MIN_ORDER_USD) {
+      if (bosBuySignal && btcGateOpen && chochGateOpen && state.cash >= MIN_ORDER_USD) {
         const buyUSD = Math.min((state.regimeStartCapital * buySlot(state.bosCount)) / 100, state.cash);
         if (buyUSD >= MIN_ORDER_USD) {
           try {
@@ -975,8 +1021,11 @@ async function processSymbol(symbol) {
       const bosSellSignal = cfg.trendFollowing ? bearBOS : bullBOS;
       const bosSellLabel  = cfg.trendFollowing ? "bearish BOS" : "bullish BOS";
 
+      // CHOCH gate: BOS only fires when gate is open
+      const chochGateOpenSell = !cfg.useChochGate || state.chochGate;
+
       // Scaled BOS sell — UNLIMITED: no slot cap; slots 5+ repeat the last ladder value
-      if (bosSellSignal && state.cryptoQty >= MIN_ORDER_QTY) {
+      if (bosSellSignal && chochGateOpenSell && state.cryptoQty >= MIN_ORDER_QTY) {
         const sellQty = Math.min((state.regimeStartCryptoQty * sellSlot(state.bosCount)) / 100, state.cryptoQty);
         if (sellQty >= MIN_ORDER_QTY) {
           try {
@@ -1277,6 +1326,7 @@ async function sendPing() {
     `Regimes   : BTC=1h  ETH/SOL/LINK=30m  PEPE=1h  AKT=15m\n` +
     `Buy scale : BTC/ETH/SOL=[${BOS_SCALE_PCT_BUY.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
     `Sell scale: BTC/ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%\n` +
+    (() => { try { const ps = loadState("PEPE-USD"); return `PEPE gate : ${ps.chochGate ? "🔓 OPEN" : "🔒 CLOSED"}  (regime: ${ps.regime})\n`; } catch { return ""; } })() +
     `Instance  : <code>${BOT_INSTANCE_ID}</code>  ← if you see two IDs, a duplicate is running`
   );
 }
