@@ -219,9 +219,11 @@ if i_showBOSlbl
             label.new(bar_index, lastSH, "BOS 🔒", color=color.new(color.orange, 20), textcolor=color.white, style=label.style_label_down, size=size.small)
 
 // --- GATE OPEN / CLOSE MARKERS -----------------------------------------------
-// Visual markers when the CHOCH gate changes state (PEPE use case)
-gateJustOpened = i_chochGate and chochGate and not chochGate[1]
-gateJustClosed = i_chochGate and not chochGate and chochGate[1]
+// Track previous gate state with an explicit var so we avoid chochGate[1]
+var bool prevChochGate = false
+gateJustOpened = i_chochGate and chochGate     and not prevChochGate
+gateJustClosed = i_chochGate and not chochGate and     prevChochGate
+prevChochGate := chochGate
 
 plotshape(gateJustOpened, "Gate Open",  shape.labelup,   location.belowbar, color=color.new(color.aqua,   0), text="🔓", textcolor=color.black, size=size.tiny)
 plotshape(gateJustClosed, "Gate Closed",shape.labeldown, location.abovebar, color=color.new(color.orange, 0), text="🔒", textcolor=color.black, size=size.tiny)
@@ -231,12 +233,10 @@ plotshape(buySignal,  "BUY Signal",  shape.triangleup,   location.belowbar, colo
 plotshape(sellSignal, "SELL Signal", shape.triangledown, location.abovebar, color=color.new(color.red,  0), size=size.normal)
 
 if buySignal
-    label.new(bar_index, na, "BUY #" + str.tostring(bosCount) + "  " + (buyBOS ? "BOS" : "CHOCH"),
-      yloc=yloc.belowbar, color=color.lime, textcolor=color.black, style=label.style_label_up, size=size.small)
+    label.new(bar_index, na, "BUY #" + str.tostring(bosCount) + "  " + (buyBOS ? "BOS" : "CHOCH"), yloc=yloc.belowbar, color=color.lime, textcolor=color.black, style=label.style_label_up, size=size.small)
 
 if sellSignal
-    label.new(bar_index, na, "SELL #" + str.tostring(bosCount) + "  " + (sellBOS ? "BOS" : "CHOCH"),
-      yloc=yloc.abovebar, color=color.red, textcolor=color.white, style=label.style_label_down, size=size.small)
+    label.new(bar_index, na, "SELL #" + str.tostring(bosCount) + "  " + (sellBOS ? "BOS" : "CHOCH"), yloc=yloc.abovebar, color=color.red, textcolor=color.white, style=label.style_label_down, size=size.small)
 
 // --- INFO TABLE --------------------------------------------------------------
 f_buyLadder(s)  =>
@@ -261,8 +261,7 @@ f_nextSellPct(s, slot) =>
     else
         slot == 0 ? 5 : slot == 1 ? 10 : slot == 2 ? 20 : 40
 
-// Table rows: Regime, Exec TF, Regime TF, EMA50, EMA200, Signals, Symbol, Buy%, Sell%, Next, [Gate]
-tableRows = i_chochGate ? 11 : 10
+// Table: 11 rows — Regime, Exec TF, Regime TF, EMA50, EMA200, Signals, Symbol, Buy%, Sell%, Next, Gate
 var table tbl = table.new(position.top_right, 2, 11, bgcolor=color.new(color.black, 75), border_width=1, border_color=color.new(color.gray, 60))
 
 if barstate.islast
