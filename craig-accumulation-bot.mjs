@@ -227,6 +227,7 @@ async function registerBotCommands() {
     { command: "resume",  description: "Resume a symbol: /resume btc  or  /resume all" },
     { command: "setcash",        description: "Fix cash balance: /setcash link 0" },
     { command: "setregimeqty",   description: "Fix sell baseline: /setregimeqty link 10.93" },
+    { command: "setcryptoqty",   description: "Force-set cryptoQty: /setcryptoqty eth 0.031" },
     { command: "setpreexisting", description: "Fix pre-existing balance offset: /setpreexisting link 0" },
     { command: "reconcile",     description: "Full state recovery after bad re-init: /reconcile eth" },
     { command: "btc",    description: "BTC-USD snapshot" },
@@ -1435,6 +1436,7 @@ async function sendHelpMessage() {
     `/resume all          — Resume ALL symbols\n` +
     `/setcash &lt;sym&gt; &lt;$&gt;      — Manually correct cash balance\n` +
     `/setregimeqty &lt;sym&gt; &lt;qty&gt; — Fix sell baseline qty (e.g. /setregimeqty link 10.93)\n` +
+    `/setcryptoqty &lt;sym&gt; &lt;qty&gt; — Force-set cryptoQty directly (e.g. /setcryptoqty eth 0.031)\n` +
     `/setpreexisting &lt;sym&gt; &lt;qty&gt; — Fix pre-existing balance offset (e.g. /setpreexisting link 0)\n` +
     `/reconcile &lt;sym&gt;       — Full state recovery after bad re-init (fixes cryptoQty + regimeStartCapital)\n` +
     `/help                — This message\n\n` +
@@ -1546,6 +1548,34 @@ async function startTelegramPoller() {
               `✅ <b>${sym}</b> regimeStartCryptoQty updated: ${fQty(old)} → ${fQty(qty)}\n` +
               `≈ $${pct} @ current price\n` +
               `Sell ladder will now use this as the 100% baseline.`
+            );
+          }
+        } else if (cmd === "/setcryptoqty") {
+          // /setcryptoqty <symbol> <qty>  e.g. /setcryptoqty eth 0.031
+          // Directly overrides cryptoQty in state — nuclear option when /reconcile can't
+          // read the correct balance from Coinbase (e.g. available_balance shows 0 due to
+          // holds, staking, or API quirks).  Use the actual bot-managed ETH qty from
+          // Coinbase's portfolio view.
+          const parts  = rawText.trim().split(/\s+/);
+          const symRaw = (parts[1] || "").toUpperCase();
+          const sym    = symRaw.includes("-") ? symRaw : `${symRaw}-USD`;
+          const qty    = parseFloat(parts[2]);
+          if (!SYMBOL_CONFIG[sym] || isNaN(qty) || qty < 0) {
+            await sendTelegram(`❌ Usage: /setcryptoqty &lt;symbol&gt; &lt;qty&gt;\nExample: <code>/setcryptoqty ETH 0.031</code>\n\nDirectly sets cryptoQty — use when /reconcile shows wrong balance from Coinbase.`);
+          } else {
+            const st  = loadState(sym);
+            const old = st.cryptoQty;
+            st.cryptoQty = qty;
+            // Also fix regimeStartCapital if it looks like a bad re-init
+            if (st.regimeStartCapital < INITIAL_CAPITAL) st.regimeStartCapital = INITIAL_CAPITAL;
+            saveState(sym, st);
+            const portVal = st.cash + qty * (st.lastPrice || 1);
+            await sendTelegram(
+              `✅ <b>${sym}</b> cryptoQty: ${fQty(old)} → ${fQty(qty)}\n` +
+              `<b>cash:</b>     $${st.cash.toFixed(2)}\n` +
+              `<b>portVal:</b>  $${portVal.toFixed(2)}  (@ $${fPrice(st.lastPrice || 1)})\n` +
+              `<b>regime:</b>   ${st.regime}  (regimeStartCap: $${st.regimeStartCapital.toFixed(2)})\n\n` +
+              `Run /scan to resume.`
             );
           }
         } else if (cmd === "/setpreexisting") {
