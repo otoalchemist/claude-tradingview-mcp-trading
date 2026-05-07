@@ -5,23 +5,29 @@ indicator("Craig Accum Bot - Signals", overlay=true, max_labels_count=500, max_l
 // Mirrors craig-accumulation-bot.mjs exactly:
 //
 //   CONTRARIAN (default) — BTC / ETH / SOL / LINK / AKT
-//     Death cross  (EMA50 < EMA200) = BUY  regime: bearBOS = buy dip | bullCHOCH = buy reversal
+//     Death cross  (EMA50 < EMA200) = BUY  regime: bearBOS = buy dip  | bullCHOCH = buy reversal
 //     Golden cross (EMA50 > EMA200) = SELL regime: bullBOS = sell rally | bearCHOCH = sell reversal
 //
 //   TREND-FOLLOWING — PEPE only  (enable "Trend-Following Mode" input)
 //     Golden cross (EMA50 > EMA200) = BUY  regime: bullBOS = buy breakout | bullCHOCH = buy reversal
 //     Death cross  (EMA50 < EMA200) = SELL regime: bearBOS = sell breakdown | bearCHOCH = sell reversal
 //
+//   CHOCH GATE — PEPE only  (enable "CHOCH Gate" input alongside Trend-Following Mode)
+//     Gate starts CLOSED at each regime change.
+//     BUY  regime: bullCHOCH opens gate → BOS buys fire | bearCHOCH closes gate → BOS buys blocked
+//     SELL regime: bearCHOCH opens gate → BOS sells fire | bullCHOCH closes gate → BOS sells blocked
+//     CHOCH signals always execute (they are the gate-opener); only BOS is gated.
+//
 //   Timeframe guide (set chart TF + Regime TF input to match your symbol):
 //     BTC-USD      exec: 15m  regime: 60
 //     ETH/SOL/LINK exec: 5m   regime: 30
-//     PEPE-USD     exec: 5m   regime: 60  ← enable Trend-Following Mode + BTC gate note
+//     PEPE-USD     exec: 5m   regime: 60  ← Trend-Following + CHOCH Gate
 //     AKT-USD      exec: 5m   regime: 15
 //
 //   Ladder reference (matches SYMBOL_CONFIG in craig-accumulation-bot.mjs):
 //     BTC/ETH/SOL  buy: 15·15·15·15  sell:  5·10·20·40  (flat-15 / back-steep)
 //     LINK         buy: 15·15·15·15  sell: 33·33·33·33  (flat-15 / flat-33)
-//     PEPE         buy: 60·25·10·5   sell: 33·33·33·33  (front-60 / flat-33)  [TREND-FOLLOWING]
+//     PEPE         buy: 60·25·10·5   sell: 33·33·33·33  (front-60 / flat-33)  [TREND + CHOCH GATE]
 //     AKT          buy: 60·25·10·5   sell: 50·25·15·10  (front-60 / front-50)
 //
 //   Slot indexing: Math.min(bosCount, ladderLength-1)
@@ -29,43 +35,39 @@ indicator("Craig Accum Bot - Signals", overlay=true, max_labels_count=500, max_l
 // =============================================================================
 
 // --- INPUTS ------------------------------------------------------------------
-// Regime TF: BTC=60, ETH/SOL/LINK=30, PEPE=60, AKT=15
-i_regimeTF       = input.timeframe("30", "Regime TF  (BTC=60 | ETH/SOL/LINK=30 | PEPE=60 | AKT=15)")
-i_emaFast        = input.int(50,  "EMA Fast", minval=1)
-i_emaSlow        = input.int(200, "EMA Slow", minval=1)
-i_swingLB        = input.int(5,   "Swing Lookback (offset hardcoded -5)", minval=1)
-i_reqBOS         = input.bool(true, "Require BOS before CHOCH")
-i_trendFollowing = input.bool(false, "Trend-Following Mode  (PEPE only: golden=BUY, death=SELL)", group="Strategy")
+i_regimeTF       = input.timeframe("30",   "Regime TF  (BTC=60 | ETH/SOL/LINK=30 | PEPE=60 | AKT=15)")
+i_emaFast        = input.int(50,           "EMA Fast",            minval=1)
+i_emaSlow        = input.int(200,          "EMA Slow",            minval=1)
+i_swingLB        = input.int(5,            "Swing Lookback",      minval=1)
+i_reqBOS         = input.bool(true,        "Require BOS before CHOCH")
+i_trendFollowing = input.bool(false,       "Trend-Following Mode  (PEPE: golden=BUY, death=SELL)", group="Strategy")
+i_chochGate      = input.bool(false,       "CHOCH Gate  (PEPE: gate-closed at regime start; bullCHOCH opens in BUY regime)", group="Strategy")
 
-i_showEMAs   = input.bool(true,  "Show Regime EMAs",      group="Display")
-i_showBG     = input.bool(true,  "Show Regime Background", group="Display")
-i_showSwings = input.bool(true,  "Show Swing H/L Dots",    group="Display")
-i_showBOSlbl = input.bool(true,  "Show BOS/CHOCH Labels",  group="Display")
+i_showEMAs       = input.bool(true,        "Show Regime EMAs",           group="Display")
+i_showBG         = input.bool(true,        "Show Regime Background",     group="Display")
+i_showSwings     = input.bool(true,        "Show Swing H/L Dots",        group="Display")
+i_showBOSlbl     = input.bool(true,        "Show BOS/CHOCH Labels",      group="Display")
+i_showGated      = input.bool(true,        "Show Gated-Out BOS (orange)", group="Display")
+i_sym            = input.string("BTC/ETH/SOL", "Symbol (for ladder display)",
+                     options=["BTC/ETH/SOL", "LINK", "PEPE", "AKT"],    group="Display")
 
 // --- REGIME TF : EMA 50 / 200 ------------------------------------------------
-// [1] inside security + lookahead_on gives us the PREVIOUS confirmed regime bar's
-// EMA — never the live developing bar.  This matches the bot exactly (buildRegime
-// only uses closed candles) and prevents repainting on the live bar.
 regEmaF = request.security(syminfo.tickerid, i_regimeTF, ta.ema(close, i_emaFast)[1], lookahead=barmerge.lookahead_on)
 regEmaS = request.security(syminfo.tickerid, i_regimeTF, ta.ema(close, i_emaSlow)[1], lookahead=barmerge.lookahead_on)
 
 plot(i_showEMAs ? regEmaF : na, "EMA 50  (Regime TF)", color=color.new(color.orange, 0), linewidth=2)
-plot(i_showEMAs ? regEmaS : na, "EMA 200 (Regime TF)", color=color.new(color.blue, 0),   linewidth=2)
+plot(i_showEMAs ? regEmaS : na, "EMA 200 (Regime TF)", color=color.new(color.blue,   0), linewidth=2)
 
 // --- REGIME STATE ------------------------------------------------------------
-// CONTRARIAN (default):  death cross = BUY, golden cross = SELL
-// TREND-FOLLOWING (PEPE): golden cross = BUY, death cross = SELL
-// Explicit comparison on closed bars — mirrors buildRegime() in the bot.
 goldenCross = regEmaF[1] <= regEmaS[1] and regEmaF > regEmaS
 deathCross  = regEmaF[1] >= regEmaS[1] and regEmaF < regEmaS
 
 var string regime = "neutral"
 if not na(regEmaF) and not na(regEmaS)
     if regime == "neutral"
-        // Initial regime: trend-following flips golden/death interpretation
         regime := i_trendFollowing
-             ? (regEmaF > regEmaS ? "buy" : "sell")   // golden = BUY for PEPE
-             : (regEmaF > regEmaS ? "sell" : "buy")   // golden = SELL for others
+             ? (regEmaF > regEmaS ? "buy" : "sell")
+             : (regEmaF > regEmaS ? "sell" : "buy")
     else if goldenCross
         regime := i_trendFollowing ? "buy" : "sell"
     else if deathCross
@@ -74,51 +76,43 @@ if not na(regEmaF) and not na(regEmaS)
 bgcolor(i_showBG and regime == "buy"  ? color.new(color.green, 92) : na, title="BUY Regime BG")
 bgcolor(i_showBG and regime == "sell" ? color.new(color.red,   92) : na, title="SELL Regime BG")
 
-// Cross labels — plotshape `text` must be a const string so we use two calls per cross,
-// one for each mode, with the condition gating which one actually fires.
-// Contrarian (default): golden=SELL (gold), death=BUY (purple)
-plotshape(not i_trendFollowing and goldenCross, "Golden Cross (SELL)", shape.labeldown, location.abovebar, color=color.rgb(255, 215, 0),        text="SELL", textcolor=color.black, size=size.small)
-plotshape(not i_trendFollowing and deathCross,  "Death Cross  (BUY)",  shape.labelup,   location.belowbar, color=color.new(color.purple, 0),    text="BUY",  textcolor=color.white, size=size.small)
-// Trend-following (PEPE): golden=BUY (lime), death=SELL (red)
-plotshape(i_trendFollowing and goldenCross, "Golden Cross (BUY)",  shape.labeldown, location.abovebar, color=color.new(color.lime, 0),           text="BUY",  textcolor=color.black, size=size.small)
-plotshape(i_trendFollowing and deathCross,  "Death Cross  (SELL)", shape.labelup,   location.belowbar, color=color.new(color.red,  0),           text="SELL", textcolor=color.white, size=size.small)
+// Cross labels — two plotshape calls per cross (const string constraint in Pine v6)
+plotshape(not i_trendFollowing and goldenCross, "Golden Cross (SELL)", shape.labeldown, location.abovebar, color=color.rgb(255, 215, 0),     text="SELL", textcolor=color.black, size=size.small)
+plotshape(not i_trendFollowing and deathCross,  "Death Cross  (BUY)",  shape.labelup,   location.belowbar, color=color.new(color.purple, 0), text="BUY",  textcolor=color.white, size=size.small)
+plotshape(i_trendFollowing and goldenCross,     "Golden Cross (BUY)",  shape.labeldown, location.abovebar, color=color.new(color.lime, 0),   text="BUY",  textcolor=color.black, size=size.small)
+plotshape(i_trendFollowing and deathCross,      "Death Cross  (SELL)", shape.labelup,   location.belowbar, color=color.new(color.red,  0),   text="SELL", textcolor=color.white, size=size.small)
 
 // --- REGIME CHANGE RESET -----------------------------------------------------
-// MUST run before pivot detection and BOS detection so the reset takes effect
-// on the same bar the cross fires.  Matches the bot:
-//   state.structure = 0; state.lastSH = null; state.lastSL = null; state.bosCount = 0;
-//
-// lastCrossBar tracks which bar the cross happened on so we can reject pivot
-// confirmations whose *origin bar* predates the cross.  ta.pivothigh confirms a
-// pivot 5 bars late, so without this filter the first 5 bars after a cross would
-// re-populate lastSH/lastSL with pre-cross pivot levels — same stale data problem.
 var int structure    = 0
 var int bosCount     = 0
-var int lastCrossBar = -999   // bar_index of the most recent regime change
+var int lastCrossBar = -999
 
 if goldenCross or deathCross
     lastCrossBar := bar_index
     structure    := 0
     bosCount     := 0
 
+// --- CHOCH GATE STATE --------------------------------------------------------
+// Simulates the gate in craig-accumulation-bot.mjs (cfg.useChochGate).
+// Starts CLOSED at every regime change; aligned CHOCH opens it; reverse CHOCH closes it.
+var bool chochGate = false
+
+if goldenCross or deathCross
+    chochGate := false   // reset to closed on every regime change
+
 // --- SWING HIGHS / LOWS ------------------------------------------------------
-// offset requires const int - hardcoded to -5 to match default Swing Lookback
 pivotH = ta.pivothigh(high, i_swingLB, i_swingLB)
-pivotL = ta.pivotlow(low,  i_swingLB, i_swingLB)
+pivotL = ta.pivotlow(low,   i_swingLB, i_swingLB)
 
 var float lastSH = na
 var float lastSL = na
 
-// Only accept pivots whose origin bar (bar_index - swingLB) is at or after the
-// last cross bar.  Pivots from before the cross use stale price levels.
 pivotOriginBar = bar_index - i_swingLB
 if not na(pivotH) and pivotOriginBar >= lastCrossBar
     lastSH := pivotH
 if not na(pivotL) and pivotOriginBar >= lastCrossBar
     lastSL := pivotL
 
-// On a cross bar itself, reset lastSH/lastSL AFTER pivot check so the pivot
-// filter above can still reject any pivot whose origin predates the cross.
 if goldenCross or deathCross
     lastSH := na
     lastSL := na
@@ -127,9 +121,6 @@ plotshape(i_showSwings and not na(pivotH), "Swing High", shape.circle, location.
 plotshape(i_showSwings and not na(pivotL), "Swing Low",  shape.circle, location.belowbar, color.new(color.lime, 20), size=size.tiny, offset=-5)
 
 // --- BOS / CHOCH DETECTION ---------------------------------------------------
-// close > lastSH and was <= lastSH -> structure -1 -> bullCHOCH, else bullBOS -> structure = 1
-// close < lastSL and was >= lastSL -> structure  1 -> bearCHOCH, else bearBOS -> structure = -1
-
 var bool bullBOS   = false
 var bool bearBOS   = false
 var bool bullCHOCH = false
@@ -154,110 +145,157 @@ if not na(lastSH) and not na(lastSL)
             bearBOS   := true
         structure := -1
 
-if i_showBOSlbl
-    if bullBOS
-        label.new(bar_index, lastSH, "BOS up", color=color.new(color.teal, 20), textcolor=color.white, style=label.style_label_up, size=size.small)
-    if bearBOS
-        label.new(bar_index, lastSL, "BOS dn", color=color.new(color.maroon, 20), textcolor=color.white, style=label.style_label_down, size=size.small)
-    if bullCHOCH
-        label.new(bar_index, lastSH, "CHOCH up", color=color.new(color.green, 10), textcolor=color.white, style=label.style_label_up, size=size.small)
-    if bearCHOCH
-        label.new(bar_index, lastSL, "CHOCH dn", color=color.new(color.red, 10), textcolor=color.white, style=label.style_label_down, size=size.small)
+// --- CHOCH GATE TOGGLE -------------------------------------------------------
+// Update gate state based on CHOCH direction BEFORE evaluating BOS signals,
+// so a same-bar CHOCH+BOS combination gets the correct gate state.
+//
+// Trend-following BUY:  bullCHOCH opens gate, bearCHOCH closes gate
+// Trend-following SELL: bearCHOCH opens gate, bullCHOCH closes gate
+if i_chochGate
+    if regime == "buy"
+        if bullCHOCH
+            chochGate := true
+        if bearCHOCH
+            chochGate := false
+    else if regime == "sell"
+        if bearCHOCH
+            chochGate := true
+        if bullCHOCH
+            chochGate := false
+
+gateOpen = not i_chochGate or chochGate
 
 // --- TRADE SIGNAL DETECTION --------------------------------------------------
-
 chochArmed = not i_reqBOS or bosCount >= 1
 
-// CONTRARIAN (default):
-//   BUY  regime: bearBOS = buy the dip       | bullCHOCH = buy reversal (armed)
-//   SELL regime: bullBOS = sell into strength | bearCHOCH = sell reversal (armed)
+// Only the signal direction applicable to the current regime fires:
+//   Contrarian BUY:  bearBOS | bullCHOCH (armed)
+//   Contrarian SELL: bullBOS | bearCHOCH (armed)
+//   Trend BUY:       bullBOS | bullCHOCH (armed)
+//   Trend SELL:      bearBOS | bearCHOCH (armed)
 //
-// TREND-FOLLOWING (PEPE):
-//   BUY  regime: bullBOS = buy breakout      | bullCHOCH = buy reversal (armed)
-//   SELL regime: bearBOS = sell breakdown    | bearCHOCH = sell reversal (armed)
-//   (CHOCH signals are the same direction in both modes)
+// BOS signals are additionally filtered by the CHOCH gate when i_chochGate is on.
 
-buyBOS    = regime == "buy"  and (i_trendFollowing ? bullBOS : bearBOS)
+buyBOS    = regime == "buy"  and (i_trendFollowing ? bullBOS : bearBOS) and gateOpen
 buyCHOCH  = regime == "buy"  and bullCHOCH and chochArmed
 buySignal = buyBOS or buyCHOCH
 
-sellBOS   = regime == "sell" and (i_trendFollowing ? bearBOS : bullBOS)
+sellBOS   = regime == "sell" and (i_trendFollowing ? bearBOS : bullBOS) and gateOpen
 sellCHOCH = regime == "sell" and bearCHOCH and chochArmed
 sellSignal = sellBOS or sellCHOCH
+
+// Gated-out BOS: would have fired but gate is closed
+buyBOSGated  = regime == "buy"  and (i_trendFollowing ? bullBOS : bearBOS) and not gateOpen
+sellBOSGated = regime == "sell" and (i_trendFollowing ? bearBOS : bullBOS) and not gateOpen
 
 if buySignal or sellSignal
     bosCount := bosCount + 1
 
+// --- BOS / CHOCH STRUCTURE LABELS (regime-filtered) -------------------------
+// Only show labels for the BOS/CHOCH type that is actionable in the current regime.
+// This removes visual clutter from opposite-direction structure events.
+if i_showBOSlbl
+    // Buy-regime: the actionable BOS is bearBOS (contrarian) or bullBOS (trend)
+    actionableBuyBOS   = regime == "buy"  and (i_trendFollowing ? bullBOS   : bearBOS)
+    actionableBuyCHOCH = regime == "buy"  and bullCHOCH
+    // Sell-regime: the actionable BOS is bullBOS (contrarian) or bearBOS (trend)
+    actionableSellBOS   = regime == "sell" and (i_trendFollowing ? bearBOS   : bullBOS)
+    actionableSellCHOCH = regime == "sell" and bearCHOCH
+
+    if actionableBuyBOS and gateOpen
+        label.new(bar_index, lastSL, "BOS", color=color.new(color.teal, 20), textcolor=color.white, style=label.style_label_up, size=size.small)
+    if actionableBuyCHOCH
+        label.new(bar_index, lastSH, "CHOCH", color=color.new(color.green, 10), textcolor=color.white, style=label.style_label_up, size=size.small)
+    if actionableSellBOS and gateOpen
+        label.new(bar_index, lastSH, "BOS", color=color.new(color.maroon, 20), textcolor=color.white, style=label.style_label_down, size=size.small)
+    if actionableSellCHOCH
+        label.new(bar_index, lastSL, "CHOCH", color=color.new(color.red, 10), textcolor=color.white, style=label.style_label_down, size=size.small)
+
+    // Gated-out BOS — show in orange when gate is blocking the signal
+    if i_showGated
+        if buyBOSGated
+            label.new(bar_index, lastSL, "BOS 🔒", color=color.new(color.orange, 20), textcolor=color.white, style=label.style_label_up, size=size.small)
+        if sellBOSGated
+            label.new(bar_index, lastSH, "BOS 🔒", color=color.new(color.orange, 20), textcolor=color.white, style=label.style_label_down, size=size.small)
+
+// --- GATE OPEN / CLOSE MARKERS -----------------------------------------------
+// Visual markers when the CHOCH gate changes state (PEPE use case)
+gateJustOpened = i_chochGate and chochGate and not chochGate[1]
+gateJustClosed = i_chochGate and not chochGate and chochGate[1]
+
+plotshape(gateJustOpened, "Gate Open",  shape.labelup,   location.belowbar, color=color.new(color.aqua,   0), text="🔓", textcolor=color.black, size=size.tiny)
+plotshape(gateJustClosed, "Gate Closed",shape.labeldown, location.abovebar, color=color.new(color.orange, 0), text="🔒", textcolor=color.black, size=size.tiny)
+
 // --- SIGNAL PLOTS ------------------------------------------------------------
 plotshape(buySignal,  "BUY Signal",  shape.triangleup,   location.belowbar, color=color.new(color.lime, 0), size=size.normal)
-plotshape(sellSignal, "SELL Signal", shape.triangledown, location.abovebar, color=color.new(color.red, 0),  size=size.normal)
+plotshape(sellSignal, "SELL Signal", shape.triangledown, location.abovebar, color=color.new(color.red,  0), size=size.normal)
 
 if buySignal
-    label.new(bar_index, na, "BUY #" + str.tostring(bosCount) + "  " + (buyBOS ? "BOS" : "CHOCH"), yloc=yloc.belowbar, color=color.lime, textcolor=color.black, style=label.style_label_up, size=size.small)
+    label.new(bar_index, na, "BUY #" + str.tostring(bosCount) + "  " + (buyBOS ? "BOS" : "CHOCH"),
+      yloc=yloc.belowbar, color=color.lime, textcolor=color.black, style=label.style_label_up, size=size.small)
 
 if sellSignal
-    label.new(bar_index, na, "SELL #" + str.tostring(bosCount) + "  " + (sellBOS ? "BOS" : "CHOCH"), yloc=yloc.abovebar, color=color.red, textcolor=color.white, style=label.style_label_down, size=size.small)
+    label.new(bar_index, na, "SELL #" + str.tostring(bosCount) + "  " + (sellBOS ? "BOS" : "CHOCH"),
+      yloc=yloc.abovebar, color=color.red, textcolor=color.white, style=label.style_label_down, size=size.small)
 
 // --- INFO TABLE --------------------------------------------------------------
-i_sym = input.string("BTC/ETH/SOL", "Symbol (for ladder display)",
-          options=["BTC/ETH/SOL", "LINK", "PEPE", "AKT"])
-
-// Ladder strings — mirrors SYMBOL_CONFIG in craig-accumulation-bot.mjs
 f_buyLadder(s)  =>
     s == "PEPE" or s == "AKT" ? "60·25·10·5" : "15·15·15·15"
 
 f_sellLadder(s) =>
-    s == "AKT"  ? "50·25·15·10" :
-     s == "LINK" or s == "PEPE" ? "33·33·33·33" :
-     "5·10·20·40"
+    s == "AKT"              ? "50·25·15·10"  :
+    s == "LINK" or s=="PEPE"? "33·33·33·33"  :
+                              "5·10·20·40"
 
-// Next-slot % — what pct the NEXT signal deploys.
-// Slot = Math.min(bosCount, 3) — slot 3 repeats for signals 4+.
-// Matches the bot's buySlot/sellSlot: arr[Math.min(idx, arr.length-1)]
 f_nextBuyPct(s, slot) =>
     if s == "PEPE" or s == "AKT"
         slot == 0 ? 60 : slot == 1 ? 25 : slot == 2 ? 10 : 5
     else
-        15  // flat-15 for BTC/ETH/SOL/LINK
+        15
 
 f_nextSellPct(s, slot) =>
     if s == "AKT"
         slot == 0 ? 50 : slot == 1 ? 25 : slot == 2 ? 15 : 10
     else if s == "LINK" or s == "PEPE"
-        33  // flat-33
+        33
     else
-        slot == 0 ? 5 : slot == 1 ? 10 : slot == 2 ? 20 : 40  // back-steep
+        slot == 0 ? 5 : slot == 1 ? 10 : slot == 2 ? 20 : 40
 
-var table tbl = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 75), border_width=1, border_color=color.new(color.gray, 60))
+// Table rows: Regime, Exec TF, Regime TF, EMA50, EMA200, Signals, Symbol, Buy%, Sell%, Next, [Gate]
+tableRows = i_chochGate ? 11 : 10
+var table tbl = table.new(position.top_right, 2, 11, bgcolor=color.new(color.black, 75), border_width=1, border_color=color.new(color.gray, 60))
 
 if barstate.islast
-    rc = regime == "buy" ? color.lime : regime == "sell" ? color.red : color.gray
-
-    // Compute next-signal slot and pct
-    nextSlot    = math.min(bosCount, 3)
+    rc        = regime == "buy" ? color.lime : regime == "sell" ? color.red : color.gray
+    nextSlot  = math.min(bosCount, 3)
     nextBuyPct  = f_nextBuyPct(i_sym, nextSlot)
     nextSellPct = f_nextSellPct(i_sym, nextSlot)
-    nextPct     = regime == "buy" ? nextBuyPct : nextSellPct
-    nextColor   = regime == "buy" ? color.new(color.lime, 20) : color.new(color.red, 20)
-    nextLabel   = str.tostring(nextPct) + "% (slot " + str.tostring(nextSlot + 1) + ")"
+    nextPct   = regime == "buy" ? nextBuyPct : nextSellPct
+    nextColor = regime == "buy" ? color.new(color.lime, 20) : color.new(color.red, 20)
+    nextLabel = str.tostring(nextPct) + "% (slot " + str.tostring(nextSlot + 1) + ")"
 
-    table.cell(tbl, 0, 0, "Regime",    text_color=color.silver, text_size=size.small, bgcolor=color.new(color.black, 50))
-    table.cell(tbl, 1, 0, str.upper(regime), text_color=rc,     text_size=size.small, bgcolor=color.new(color.black, 50))
-    table.cell(tbl, 0, 1, "Exec TF",   text_color=color.silver, text_size=size.small)
-    table.cell(tbl, 1, 1, timeframe.period, text_color=color.white, text_size=size.small)
-    table.cell(tbl, 0, 2, "Regime TF", text_color=color.silver, text_size=size.small)
-    table.cell(tbl, 1, 2, i_regimeTF,  text_color=color.white,  text_size=size.small)
-    table.cell(tbl, 0, 3, "EMA " + str.tostring(i_emaFast), text_color=color.silver, text_size=size.small)
-    table.cell(tbl, 1, 3, str.tostring(regEmaF, "#.####"),  text_color=color.orange, text_size=size.small)
-    table.cell(tbl, 0, 4, "EMA " + str.tostring(i_emaSlow), text_color=color.silver, text_size=size.small)
-    table.cell(tbl, 1, 4, str.tostring(regEmaS, "#.####"),  text_color=color.new(color.blue, 0), text_size=size.small)
-    table.cell(tbl, 0, 5, "Signals",   text_color=color.silver, text_size=size.small)
-    table.cell(tbl, 1, 5, str.tostring(bosCount), text_color=color.white, text_size=size.small)
-    table.cell(tbl, 0, 6, "Symbol",    text_color=color.silver, text_size=size.small)
-    table.cell(tbl, 1, 6, i_sym,       text_color=color.white,  text_size=size.small)
-    table.cell(tbl, 0, 7, "Buy %",     text_color=color.silver, text_size=size.small)
-    table.cell(tbl, 1, 7, f_buyLadder(i_sym),  text_color=color.new(color.lime, 20), text_size=size.small)
-    table.cell(tbl, 0, 8, "Sell %",    text_color=color.silver, text_size=size.small)
-    table.cell(tbl, 1, 8, f_sellLadder(i_sym), text_color=color.new(color.red, 20),  text_size=size.small)
-    table.cell(tbl, 0, 9, "Next →",    text_color=color.silver, text_size=size.small)
-    table.cell(tbl, 1, 9, nextLabel,   text_color=nextColor,    text_size=size.small)
+    table.cell(tbl, 0, 0,  "Regime",    text_color=color.silver, text_size=size.small, bgcolor=color.new(color.black, 50))
+    table.cell(tbl, 1, 0,  str.upper(regime), text_color=rc,     text_size=size.small, bgcolor=color.new(color.black, 50))
+    table.cell(tbl, 0, 1,  "Exec TF",   text_color=color.silver, text_size=size.small)
+    table.cell(tbl, 1, 1,  timeframe.period, text_color=color.white, text_size=size.small)
+    table.cell(tbl, 0, 2,  "Regime TF", text_color=color.silver, text_size=size.small)
+    table.cell(tbl, 1, 2,  i_regimeTF,  text_color=color.white,  text_size=size.small)
+    table.cell(tbl, 0, 3,  "EMA " + str.tostring(i_emaFast), text_color=color.silver, text_size=size.small)
+    table.cell(tbl, 1, 3,  str.tostring(regEmaF, "#.####"),  text_color=color.orange, text_size=size.small)
+    table.cell(tbl, 0, 4,  "EMA " + str.tostring(i_emaSlow), text_color=color.silver, text_size=size.small)
+    table.cell(tbl, 1, 4,  str.tostring(regEmaS, "#.####"),  text_color=color.new(color.blue, 0), text_size=size.small)
+    table.cell(tbl, 0, 5,  "Signals",   text_color=color.silver, text_size=size.small)
+    table.cell(tbl, 1, 5,  str.tostring(bosCount), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 0, 6,  "Symbol",    text_color=color.silver, text_size=size.small)
+    table.cell(tbl, 1, 6,  i_sym,       text_color=color.white,  text_size=size.small)
+    table.cell(tbl, 0, 7,  "Buy %",     text_color=color.silver, text_size=size.small)
+    table.cell(tbl, 1, 7,  f_buyLadder(i_sym),  text_color=color.new(color.lime, 20), text_size=size.small)
+    table.cell(tbl, 0, 8,  "Sell %",    text_color=color.silver, text_size=size.small)
+    table.cell(tbl, 1, 8,  f_sellLadder(i_sym), text_color=color.new(color.red,  20), text_size=size.small)
+    table.cell(tbl, 0, 9,  "Next →",    text_color=color.silver, text_size=size.small)
+    table.cell(tbl, 1, 9,  nextLabel,   text_color=nextColor,    text_size=size.small)
+    // Row 10: CHOCH gate status (only meaningful when i_chochGate is enabled)
+    gateColor = chochGate ? color.new(color.aqua, 20) : color.new(color.orange, 20)
+    gateText  = i_chochGate ? (chochGate ? "OPEN 🔓" : "CLOSED 🔒") : "off"
+    table.cell(tbl, 0, 10, "Gate",      text_color=color.silver, text_size=size.small)
+    table.cell(tbl, 1, 10, gateText,    text_color=gateColor,    text_size=size.small)
