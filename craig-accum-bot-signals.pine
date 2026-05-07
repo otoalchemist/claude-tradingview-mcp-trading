@@ -65,9 +65,7 @@ deathCross  = regEmaF[1] >= regEmaS[1] and regEmaF < regEmaS
 var string regime = "neutral"
 if not na(regEmaF) and not na(regEmaS)
     if regime == "neutral"
-        regime := i_trendFollowing
-             ? (regEmaF > regEmaS ? "buy" : "sell")
-             : (regEmaF > regEmaS ? "sell" : "buy")
+        regime := i_trendFollowing ? (regEmaF > regEmaS ? "buy" : "sell") : (regEmaF > regEmaS ? "sell" : "buy")
     else if goldenCross
         regime := i_trendFollowing ? "buy" : "sell"
     else if deathCross
@@ -243,9 +241,7 @@ f_buyLadder(s)  =>
     s == "PEPE" or s == "AKT" ? "60·25·10·5" : "15·15·15·15"
 
 f_sellLadder(s) =>
-    s == "AKT"              ? "50·25·15·10"  :
-    s == "LINK" or s=="PEPE"? "33·33·33·33"  :
-                              "5·10·20·40"
+    s == "AKT" ? "50·25·15·10" : (s == "LINK" or s == "PEPE") ? "33·33·33·33" : "5·10·20·40"
 
 f_nextBuyPct(s, slot) =>
     if s == "PEPE" or s == "AKT"
