@@ -20,6 +20,10 @@ node craig-backtest-multi.mjs [d1 d2 ...]  # e.g. node craig-backtest-multi.mjs 
 
 # Buy/sell ladder sweep (14×12=168 combos per symbol × 5 symbols)
 node craig-backtest-ladders.mjs [days]
+
+# Tests
+npm test           # vitest run (one-shot)
+npm run test:watch # vitest watch mode
 ```
 
 No build step. ESM modules (`"type": "module"` in package.json). Node 18+ required.
@@ -56,9 +60,9 @@ Coinbase has no native 4h granularity — `aggregateCandles(bars, FOUR_HOUR_MS)`
 | Symbol | buyLadder | sellLadder |
 |---|---|---|
 | BTC/ETH/SOL | [15,15,15,15] flat | [5,10,20,40] back-steep |
-| LINK | [15,15,15,15] flat | [33,33,33,33] flat |
-| PEPE | [33,33,33,33] flat | [33,33,33,33] flat |
-| AKT | [33,33,33,33] flat | [5,10,20,40] back-steep |
+| LINK | [15,15,15,15] flat (global) | [33,33,33,33] flat |
+| PEPE | [60,25,10,5] front-60 | [33,33,33,33] flat |
+| AKT | [60,25,10,5] front-60 | [50,25,15,10] front-50 |
 
 - **Buy ladder**: % of `regimeStartCapital` per BOS signal (slot 4+ repeats the last value — unlimited signals)
 - **Sell ladder**: % of `regimeStartCryptoQty` per BOS signal (same repeat mechanic)
@@ -68,12 +72,28 @@ Coinbase has no native 4h granularity — `aggregateCandles(bars, FOUR_HOUR_MS)`
 
 Each symbol has a `craig-state-{SYMBOL}.json` with fields:
 - `regime` — `"buy"` / `"sell"` / `"neutral"`
-- `regimeStartCapital` — USD baseline for buy sizing
+- `regimeStartCapital` — USD baseline for buy sizing (full portfolio value at regime start)
 - `regimeStartCryptoQty` — crypto qty baseline for sell sizing (**critical**: must match actual balance at regime start or sells calculate to 0)
+- `regimeStartPrice` — price at regime start (used for HODL comparison)
 - `bosCount` — signals fired in current regime (indexes into the ladder)
+- `preExistingCryptoQty` — crypto held on exchange before the bot started managing the symbol; excluded from portVal and reconciliation
 - `initialized` — false means the bot will run the init block on next scan
 
 **Atomic writes**: state is written to `.tmp` then renamed to prevent corrupt state on crash.
+
+## P&L Baseline Logic
+
+`buildSymbolReport` and `sendRegimeOverview` compute P&L as `(portVal - pnlBaseline) / pnlBaseline`:
+
+```js
+const pnlBaseline = (s.preExistingCryptoQty > 0)
+  ? INITIAL_CAPITAL                          // inherited position (e.g. LINK via /setregimeqty)
+  : (s.regimeStartCapital || INITIAL_CAPITAL); // normal: portfolio value at regime start
+```
+
+**Inherited positions** (e.g. LINK set up via `/setregimeqty` with crypto already on exchange): `preExistingCryptoQty > 0` → baseline is `INITIAL_CAPITAL` ($100). This avoids double-counting the crypto value against the bot's cash allocation.
+
+**Normal positions**: baseline is `regimeStartCapital` (the actual portfolio value recorded at the golden/death cross).
 
 ## Critical Known Bugs (Fixed)
 
@@ -104,6 +124,7 @@ The live bot uses the **Coinbase Advanced Trade authenticated API** (`api.coinba
 
 `/setregimeqty <sym> <qty>` — fixes `regimeStartCryptoQty` without a restart  
 `/setcash <sym> <amount>` — fixes `cash` balance  
+`/setpreexisting <sym> <qty>` — fixes `preExistingCryptoQty` and re-syncs `cryptoQty` from exchange  
 `/pause <sym|all>` / `/resume <sym|all>` — halts signal processing for a symbol  
 `/scan` — triggers an immediate scan cycle  
 `/ping` — shows uptime, instance ID, and ladder config
