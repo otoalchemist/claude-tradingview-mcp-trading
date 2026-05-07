@@ -9,11 +9,20 @@ indicator("Craig Accum Bot - Signals", overlay=true, max_labels_count=500, max_l
 //   BUY  regime: bearBOS = buy the dip   | bullCHOCH = buy reversal
 //   SELL regime: bullBOS = sell rally    | bearCHOCH = sell reversal
 //
-//   Timeframe guide (set Regime TF input to match your symbol):
-//     BTC-USD          exec: 15m  regime: 60
-//     ETH/SOL/LINK     exec: 5m   regime: 30
-//     PEPE-USD         exec: 5m   regime: 60
-//     AKT-USD          exec: 5m   regime: 15
+//   Timeframe guide (set chart TF + Regime TF input to match your symbol):
+//     BTC-USD      exec: 15m  regime: 60
+//     ETH/SOL/LINK exec: 5m   regime: 30
+//     PEPE-USD     exec: 5m   regime: 60
+//     AKT-USD      exec: 5m   regime: 15
+//
+//   Ladder reference (matches SYMBOL_CONFIG in craig-accumulation-bot.mjs):
+//     BTC/ETH/SOL  buy: 15·15·15·15  sell:  5·10·20·40  (flat-15 / back-steep)
+//     LINK         buy: 15·15·15·15  sell: 33·33·33·33  (flat-15 / flat-33)
+//     PEPE         buy: 60·25·10·5   sell: 33·33·33·33  (front-60 / flat-33)
+//     AKT          buy: 60·25·10·5   sell: 50·25·15·10  (front-60 / front-50)
+//
+//   Slot indexing: Math.min(bosCount, ladderLength-1)
+//   → slot 0 = signal #1, slot 1 = signal #2 … slot 3+ repeats last value
 // =============================================================================
 
 // --- INPUTS ------------------------------------------------------------------
@@ -70,8 +79,8 @@ plotshape(deathCross,  "Death Cross  (BUY)",  shape.labelup,   location.belowbar
 // confirmations whose *origin bar* predates the cross.  ta.pivothigh confirms a
 // pivot 5 bars late, so without this filter the first 5 bars after a cross would
 // re-populate lastSH/lastSL with pre-cross pivot levels — same stale data problem.
-var int structure  = 0
-var int bosCount   = 0
+var int structure    = 0
+var int bosCount     = 0
 var int lastCrossBar = -999   // bar_index of the most recent regime change
 
 if goldenCross or deathCross
@@ -170,21 +179,47 @@ if sellSignal
     label.new(bar_index, na, "SELL #" + str.tostring(bosCount) + "  " + (sellBOS ? "BOS" : "CHOCH"), yloc=yloc.abovebar, color=color.red, textcolor=color.white, style=label.style_label_down, size=size.small)
 
 // --- INFO TABLE --------------------------------------------------------------
-// Ladder reference (matches SYMBOL_CONFIG in craig-accumulation-bot.mjs):
-//   BTC/ETH/SOL  buy: 15·15·15·15  sell:  5·10·20·40 (flat / back-steep)
-//   LINK         buy: 15·15·15·15  sell: 33·33·33·33 (flat / flat-33)
-//   PEPE         buy: 60·25·10·5   sell: 33·33·33·33 (front-60 / flat-33)
-//   AKT          buy: 60·25·10·5   sell: 50·25·15·10 (front-60 / front-50)
 i_sym = input.string("BTC/ETH/SOL", "Symbol (for ladder display)",
           options=["BTC/ETH/SOL", "LINK", "PEPE", "AKT"])
 
-f_buyLadder(s)  => s == "PEPE" or s == "AKT" ? "60·25·10·5" : "15·15·15·15"
-f_sellLadder(s) => s == "LINK" ? "33·33·33·33" : s == "PEPE" ? "33·33·33·33" : s == "AKT" ? "50·25·15·10" : "5·10·20·40"
+// Ladder strings — mirrors SYMBOL_CONFIG in craig-accumulation-bot.mjs
+f_buyLadder(s)  =>
+    s == "PEPE" or s == "AKT" ? "60·25·10·5" : "15·15·15·15"
 
-var table tbl = table.new(position.top_right, 2, 9, bgcolor=color.new(color.black, 75), border_width=1, border_color=color.new(color.gray, 60))
+f_sellLadder(s) =>
+    s == "AKT"  ? "50·25·15·10" :
+     s == "LINK" or s == "PEPE" ? "33·33·33·33" :
+     "5·10·20·40"
+
+// Next-slot % — what pct the NEXT signal deploys.
+// Slot = Math.min(bosCount, 3) — slot 3 repeats for signals 4+.
+// Matches the bot's buySlot/sellSlot: arr[Math.min(idx, arr.length-1)]
+f_nextBuyPct(s, slot) =>
+    if s == "PEPE" or s == "AKT"
+        slot == 0 ? 60 : slot == 1 ? 25 : slot == 2 ? 10 : 5
+    else
+        15  // flat-15 for BTC/ETH/SOL/LINK
+
+f_nextSellPct(s, slot) =>
+    if s == "AKT"
+        slot == 0 ? 50 : slot == 1 ? 25 : slot == 2 ? 15 : 10
+    else if s == "LINK" or s == "PEPE"
+        33  // flat-33
+    else
+        slot == 0 ? 5 : slot == 1 ? 10 : slot == 2 ? 20 : 40  // back-steep
+
+var table tbl = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 75), border_width=1, border_color=color.new(color.gray, 60))
 
 if barstate.islast
     rc = regime == "buy" ? color.lime : regime == "sell" ? color.red : color.gray
+
+    // Compute next-signal slot and pct
+    nextSlot    = math.min(bosCount, 3)
+    nextBuyPct  = f_nextBuyPct(i_sym, nextSlot)
+    nextSellPct = f_nextSellPct(i_sym, nextSlot)
+    nextPct     = regime == "buy" ? nextBuyPct : nextSellPct
+    nextColor   = regime == "buy" ? color.new(color.lime, 20) : color.new(color.red, 20)
+    nextLabel   = str.tostring(nextPct) + "% (slot " + str.tostring(nextSlot + 1) + ")"
 
     table.cell(tbl, 0, 0, "Regime",    text_color=color.silver, text_size=size.small, bgcolor=color.new(color.black, 50))
     table.cell(tbl, 1, 0, str.upper(regime), text_color=rc,     text_size=size.small, bgcolor=color.new(color.black, 50))
@@ -204,3 +239,5 @@ if barstate.islast
     table.cell(tbl, 1, 7, f_buyLadder(i_sym),  text_color=color.new(color.lime, 20), text_size=size.small)
     table.cell(tbl, 0, 8, "Sell %",    text_color=color.silver, text_size=size.small)
     table.cell(tbl, 1, 8, f_sellLadder(i_sym), text_color=color.new(color.red, 20),  text_size=size.small)
+    table.cell(tbl, 0, 9, "Next →",    text_color=color.silver, text_size=size.small)
+    table.cell(tbl, 1, 9, nextLabel,   text_color=nextColor,    text_size=size.small)
