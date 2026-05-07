@@ -125,6 +125,7 @@ The live bot uses the **Coinbase Advanced Trade authenticated API** (`api.coinba
 `/setregimeqty <sym> <qty>` — fixes `regimeStartCryptoQty` without a restart  
 `/setcash <sym> <amount>` — fixes `cash` balance  
 `/setpreexisting <sym> <qty>` — fixes `preExistingCryptoQty` and re-syncs `cryptoQty` from exchange  
+`/reconcile <sym>` — full state recovery after accidental re-init: re-syncs `cryptoQty` from exchange, resets `regimeStartCapital` to `INITIAL_CAPITAL`, fixes `regimeStartCryptoQty` if sell regime and zero  
 `/pause <sym|all>` / `/resume <sym|all>` — halts signal processing for a symbol  
 `/scan` — triggers an immediate scan cycle  
 `/ping` — shows uptime, instance ID, and ladder config

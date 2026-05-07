@@ -228,6 +228,7 @@ async function registerBotCommands() {
     { command: "setcash",        description: "Fix cash balance: /setcash link 0" },
     { command: "setregimeqty",   description: "Fix sell baseline: /setregimeqty link 10.93" },
     { command: "setpreexisting", description: "Fix pre-existing balance offset: /setpreexisting link 0" },
+    { command: "reconcile",     description: "Full state recovery after bad re-init: /reconcile eth" },
     { command: "btc",    description: "BTC-USD snapshot" },
     { command: "eth",    description: "ETH-USD snapshot" },
     { command: "sol",    description: "SOL-USD snapshot" },
@@ -590,7 +591,14 @@ function loadState(symbol) {
       }
     }
     return state;
-  } catch {
+  } catch (e) {
+    // State file exists but failed to parse — alert loudly rather than silently resetting.
+    // A corrupted reset in live mode means the bot would re-init and misclassify all
+    // existing exchange balance as pre-existing, breaking buy sizing and portfolio value.
+    console.error(`[${symbol}] State file corrupt — falling back to fresh state: ${e.message}`);
+    if (LIVE_TRADING) {
+      sendTelegram(`🚨 <b>${symbol}</b> state file corrupted (${e.message})\nFalling back to fresh state — run <code>/reconcile ${symbol.replace("-USD","")}</code> after first scan to restore correct balances.`).catch(() => {});
+    }
     return makeFreshState(symbol);
   }
 }
@@ -704,6 +712,21 @@ async function processSymbol(symbol) {
     if (LIVE_TRADING) {
       try {
         const pos = await fetchCoinbasePosition(symbol);
+        // ── Accidental re-init guard ──────────────────────────────────────────
+        // If meaningful crypto is on the exchange, this may be an accidental re-init
+        // (e.g. state file wiped after a Railway volume issue). Warn loudly and treat
+        // the balance as pre-existing so the user can correct with /setpreexisting + /reconcile.
+        // For a true first start the user should have 0 or known pre-existing balance.
+        if (pos.cryptoQty * lastBar.c > INITIAL_CAPITAL * 0.05) {
+          const symShort = symbol.replace("-USD", "");
+          await sendTelegram(
+            `⚠️ <b>${symbol}</b> initializing with ${fQty(pos.cryptoQty)} on exchange ($${(pos.cryptoQty * lastBar.c).toFixed(2)}).\n` +
+            `If this was <b>bot-managed</b> crypto (not pre-existing), run:\n` +
+            `<code>/setpreexisting ${symShort} 0</code>\n` +
+            `<code>/reconcile ${symShort}</code>\n\n` +
+            `If it was pre-existing, no action needed.`
+          );
+        }
         // Record pre-existing balance so the bot only tracks its own $INITIAL_CAPITAL
         // allocation. P&L, sell sizing, and reconciliation all exclude preExistingCryptoQty.
         state.preExistingCryptoQty = pos.cryptoQty;
@@ -715,17 +738,20 @@ async function processSymbol(symbol) {
     }
     reconciledThisSession.add(symbol);   // mark as reconciled — skip the startup check
 
-    // Now determine regime with accurate cryptoQty
+    // Now determine regime with accurate cryptoQty.
+    // trendFollowing symbols (PEPE): golden=BUY, death=SELL — opposite of normal.
     const periodMs    = cfg.regime.ms;
     const recentClose = Math.floor(lastBar.t / periodMs) * periodMs;
     const initS       = stateMap.get(recentClose);
+    const buyInitCross  = cfg.trendFollowing ? "golden" : "death";
+    const sellInitCross = cfg.trendFollowing ? "death"  : "golden";
 
-    if (initS === "death") {
+    if (initS === buyInitCross) {
       state.regime             = "buy";
       state.regimeStartCapital = state.cash;
       state.regimeStartPrice   = lastBar.c;
       state.regimeCount.buy++;
-    } else if (initS === "golden") {
+    } else if (initS === sellInitCross) {
       state.regime                = "sell";
       state.regimeStartCryptoQty  = state.cryptoQty;   // now correct — real balance already loaded above
       state.regimeStartCapital    = state.cash + state.cryptoQty * lastBar.c;  // full portfolio value at sell start
@@ -1410,6 +1436,7 @@ async function sendHelpMessage() {
     `/setcash &lt;sym&gt; &lt;$&gt;      — Manually correct cash balance\n` +
     `/setregimeqty &lt;sym&gt; &lt;qty&gt; — Fix sell baseline qty (e.g. /setregimeqty link 10.93)\n` +
     `/setpreexisting &lt;sym&gt; &lt;qty&gt; — Fix pre-existing balance offset (e.g. /setpreexisting link 0)\n` +
+    `/reconcile &lt;sym&gt;       — Full state recovery after bad re-init (fixes cryptoQty + regimeStartCapital)\n` +
     `/help                — This message\n\n` +
     `<b>Strategy</b>\n` +
     `BTC: 1h regime / 15m exec\n` +
@@ -1554,6 +1581,56 @@ async function startTelegramPoller() {
             } else {
               saveState(sym, st);
               await sendTelegram(`✅ <b>${sym}</b> preExistingCryptoQty: ${fQty(oldPx)} → ${fQty(qty)} (paper mode — no balance sync)`);
+            }
+          }
+        } else if (cmd === "/reconcile") {
+          // /reconcile <symbol>  e.g. /reconcile eth
+          // Full state recovery after accidental re-init or state corruption.
+          // Fetches real balance from Coinbase, corrects cryptoQty and regimeStartCapital.
+          const parts  = rawText.trim().split(/\s+/);
+          const symRaw = (parts[1] || "").toUpperCase();
+          const sym    = symRaw.includes("-") ? symRaw : `${symRaw}-USD`;
+          if (!SYMBOL_CONFIG[sym]) {
+            await sendTelegram(`❌ Usage: /reconcile &lt;symbol&gt;\nExample: <code>/reconcile ETH</code>`);
+          } else if (!LIVE_TRADING) {
+            await sendTelegram(`❌ /reconcile only works in live trading mode.`);
+          } else {
+            try {
+              const st  = loadState(sym);
+              const pos = await fetchCoinbasePosition(sym);
+              const oldCrypto = st.cryptoQty;
+              const oldRSC    = st.regimeStartCapital;
+              const oldRSCQ   = st.regimeStartCryptoQty;
+
+              // Fix 1: cryptoQty = actual exchange balance minus any pre-existing
+              st.cryptoQty = Math.max(0, pos.cryptoQty - (st.preExistingCryptoQty ?? 0));
+
+              // Fix 2: regimeStartCapital — restore to INITIAL_CAPITAL so the buy ladder
+              // sizes correctly (Math.min(..., cash) still caps each buy at available cash)
+              st.regimeStartCapital = INITIAL_CAPITAL;
+
+              // Fix 3: if sell regime, regimeStartCryptoQty should reflect actual holdings
+              if (st.regime === "sell" && st.regimeStartCryptoQty === 0) {
+                st.regimeStartCryptoQty = st.cryptoQty;
+              }
+
+              saveState(sym, st);
+
+              const portVal = st.cash + st.cryptoQty * (st.lastPrice || pos.cryptoQty > 0 ? st.lastPrice : 1);
+              await sendTelegram(
+                `✅ <b>${sym}</b> reconciled\n\n` +
+                `<b>cryptoQty:</b>       ${fQty(oldCrypto)} → ${fQty(st.cryptoQty)}\n` +
+                `<b>preExisting:</b>     ${fQty(st.preExistingCryptoQty ?? 0)}\n` +
+                `<b>on exchange:</b>     ${fQty(pos.cryptoQty)}\n` +
+                `<b>regimeStartCap:</b>  $${oldRSC.toFixed(2)} → $${st.regimeStartCapital.toFixed(2)}\n` +
+                `<b>regimeStartQty:</b>  ${fQty(oldRSCQ)} → ${fQty(st.regimeStartCryptoQty)}\n` +
+                `<b>cash:</b>           $${st.cash.toFixed(2)}\n` +
+                `<b>portVal:</b>        $${portVal.toFixed(2)}\n` +
+                `<b>regime:</b>         ${st.regime}\n\n` +
+                `Run /scan to resume normal operation.`
+              );
+            } catch (e) {
+              await sendTelegram(`❌ <b>${sym}</b> reconcile failed: ${e.message}`);
             }
           }
         } else if (cmd === "/pause") {
