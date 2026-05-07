@@ -1605,18 +1605,26 @@ async function startTelegramPoller() {
               // Fix 1: cryptoQty = actual exchange balance minus any pre-existing
               st.cryptoQty = Math.max(0, pos.cryptoQty - (st.preExistingCryptoQty ?? 0));
 
-              // Fix 2: regimeStartCapital — restore to INITIAL_CAPITAL so the buy ladder
-              // sizes correctly (Math.min(..., cash) still caps each buy at available cash)
-              st.regimeStartCapital = INITIAL_CAPITAL;
+              // Fix 2: regimeStartCapital — only reset to INITIAL_CAPITAL when the current
+              // value is clearly wrong (below INITIAL_CAPITAL, as happens after an accidental
+              // re-init where it gets set to just the remaining cash ~$26).  If it's at or
+              // above INITIAL_CAPITAL the bot is running normally and we must not overwrite it
+              // (e.g. legitimate growth to $180 in a long-running regime would be destroyed).
+              if (st.regimeStartCapital < INITIAL_CAPITAL) {
+                st.regimeStartCapital = INITIAL_CAPITAL;
+              }
 
-              // Fix 3: if sell regime, regimeStartCryptoQty should reflect actual holdings
-              if (st.regime === "sell" && st.regimeStartCryptoQty === 0) {
+              // Fix 3: if sell regime, regimeStartCryptoQty must be >= cryptoQty (we can
+              // only have sold some fraction of what we started with).  Fix both the
+              // zero case (bad re-init) AND the nonzero-but-wrong case (e.g. manual
+              // setregimeqty error, or value from a different regime cycle).
+              if (st.regime === "sell" && st.regimeStartCryptoQty < st.cryptoQty) {
                 st.regimeStartCryptoQty = st.cryptoQty;
               }
 
               saveState(sym, st);
 
-              const portVal = st.cash + st.cryptoQty * (st.lastPrice || pos.cryptoQty > 0 ? st.lastPrice : 1);
+              const portVal = st.cash + st.cryptoQty * (st.lastPrice || 1);
               await sendTelegram(
                 `✅ <b>${sym}</b> reconciled\n\n` +
                 `<b>cryptoQty:</b>       ${fQty(oldCrypto)} → ${fQty(st.cryptoQty)}\n` +

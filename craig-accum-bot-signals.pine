@@ -3,22 +3,25 @@ indicator("Craig Accum Bot - Signals", overlay=true, max_labels_count=500, max_l
 
 // =============================================================================
 // Mirrors craig-accumulation-bot.mjs exactly:
-//   EMA 50/200 on Regime TF  (death cross = BUY regime, golden cross = SELL)
-//   Swing H/L via pivothigh/pivotlow  (lookback = 5)
-//   BOS / CHOCH detection on Exec TF
-//   BUY  regime: bearBOS = buy the dip   | bullCHOCH = buy reversal
-//   SELL regime: bullBOS = sell rally    | bearCHOCH = sell reversal
+//
+//   CONTRARIAN (default) — BTC / ETH / SOL / LINK / AKT
+//     Death cross  (EMA50 < EMA200) = BUY  regime: bearBOS = buy dip | bullCHOCH = buy reversal
+//     Golden cross (EMA50 > EMA200) = SELL regime: bullBOS = sell rally | bearCHOCH = sell reversal
+//
+//   TREND-FOLLOWING — PEPE only  (enable "Trend-Following Mode" input)
+//     Golden cross (EMA50 > EMA200) = BUY  regime: bullBOS = buy breakout | bullCHOCH = buy reversal
+//     Death cross  (EMA50 < EMA200) = SELL regime: bearBOS = sell breakdown | bearCHOCH = sell reversal
 //
 //   Timeframe guide (set chart TF + Regime TF input to match your symbol):
 //     BTC-USD      exec: 15m  regime: 60
 //     ETH/SOL/LINK exec: 5m   regime: 30
-//     PEPE-USD     exec: 5m   regime: 60
+//     PEPE-USD     exec: 5m   regime: 60  ← enable Trend-Following Mode + BTC gate note
 //     AKT-USD      exec: 5m   regime: 15
 //
 //   Ladder reference (matches SYMBOL_CONFIG in craig-accumulation-bot.mjs):
 //     BTC/ETH/SOL  buy: 15·15·15·15  sell:  5·10·20·40  (flat-15 / back-steep)
 //     LINK         buy: 15·15·15·15  sell: 33·33·33·33  (flat-15 / flat-33)
-//     PEPE         buy: 60·25·10·5   sell: 33·33·33·33  (front-60 / flat-33)
+//     PEPE         buy: 60·25·10·5   sell: 33·33·33·33  (front-60 / flat-33)  [TREND-FOLLOWING]
 //     AKT          buy: 60·25·10·5   sell: 50·25·15·10  (front-60 / front-50)
 //
 //   Slot indexing: Math.min(bosCount, ladderLength-1)
@@ -27,11 +30,12 @@ indicator("Craig Accum Bot - Signals", overlay=true, max_labels_count=500, max_l
 
 // --- INPUTS ------------------------------------------------------------------
 // Regime TF: BTC=60, ETH/SOL/LINK=30, PEPE=60, AKT=15
-i_regimeTF   = input.timeframe("30", "Regime TF  (BTC=60 | ETH/SOL/LINK=30 | PEPE=60 | AKT=15)")
-i_emaFast    = input.int(50,  "EMA Fast", minval=1)
-i_emaSlow    = input.int(200, "EMA Slow", minval=1)
-i_swingLB    = input.int(5,   "Swing Lookback (offset hardcoded -5)", minval=1)
-i_reqBOS     = input.bool(true, "Require BOS before CHOCH")
+i_regimeTF       = input.timeframe("30", "Regime TF  (BTC=60 | ETH/SOL/LINK=30 | PEPE=60 | AKT=15)")
+i_emaFast        = input.int(50,  "EMA Fast", minval=1)
+i_emaSlow        = input.int(200, "EMA Slow", minval=1)
+i_swingLB        = input.int(5,   "Swing Lookback (offset hardcoded -5)", minval=1)
+i_reqBOS         = input.bool(true, "Require BOS before CHOCH")
+i_trendFollowing = input.bool(false, "Trend-Following Mode  (PEPE only: golden=BUY, death=SELL)", group="Strategy")
 
 i_showEMAs   = input.bool(true,  "Show Regime EMAs",      group="Display")
 i_showBG     = input.bool(true,  "Show Regime Background", group="Display")
@@ -49,8 +53,8 @@ plot(i_showEMAs ? regEmaF : na, "EMA 50  (Regime TF)", color=color.new(color.ora
 plot(i_showEMAs ? regEmaS : na, "EMA 200 (Regime TF)", color=color.new(color.blue, 0),   linewidth=2)
 
 // --- REGIME STATE ------------------------------------------------------------
-// Death cross  (EMA50 crosses BELOW EMA200) = BUY  regime (accumulate on dips)
-// Golden cross (EMA50 crosses ABOVE EMA200) = SELL regime (distribute on rallies)
+// CONTRARIAN (default):  death cross = BUY, golden cross = SELL
+// TREND-FOLLOWING (PEPE): golden cross = BUY, death cross = SELL
 // Explicit comparison on closed bars — mirrors buildRegime() in the bot.
 goldenCross = regEmaF[1] <= regEmaS[1] and regEmaF > regEmaS
 deathCross  = regEmaF[1] >= regEmaS[1] and regEmaF < regEmaS
@@ -58,17 +62,32 @@ deathCross  = regEmaF[1] >= regEmaS[1] and regEmaF < regEmaS
 var string regime = "neutral"
 if not na(regEmaF) and not na(regEmaS)
     if regime == "neutral"
-        regime := regEmaF > regEmaS ? "sell" : "buy"
+        // Initial regime: trend-following flips golden/death interpretation
+        regime := i_trendFollowing
+             ? (regEmaF > regEmaS ? "buy" : "sell")   // golden = BUY for PEPE
+             : (regEmaF > regEmaS ? "sell" : "buy")   // golden = SELL for others
     else if goldenCross
-        regime := "sell"
+        regime := i_trendFollowing ? "buy" : "sell"
     else if deathCross
-        regime := "buy"
+        regime := i_trendFollowing ? "sell" : "buy"
 
 bgcolor(i_showBG and regime == "buy"  ? color.new(color.green, 92) : na, title="BUY Regime BG")
 bgcolor(i_showBG and regime == "sell" ? color.new(color.red,   92) : na, title="SELL Regime BG")
 
-plotshape(goldenCross, "Golden Cross (SELL)", shape.labeldown, location.abovebar, color=color.rgb(255, 215, 0), text="SELL", textcolor=color.black, size=size.small)
-plotshape(deathCross,  "Death Cross  (BUY)",  shape.labelup,   location.belowbar, color=color.new(color.purple, 0), text="BUY", textcolor=color.white, size=size.small)
+// Cross labels: contrarian shows golden=SELL (gold label), death=BUY (purple label)
+//               trend-following flips: golden=BUY (lime label), death=SELL (red label)
+plotshape(goldenCross, "Golden Cross",
+     shape.labeldown, location.abovebar,
+     color     = i_trendFollowing ? color.new(color.lime, 0) : color.rgb(255, 215, 0),
+     text      = i_trendFollowing ? "BUY" : "SELL",
+     textcolor = color.black,
+     size      = size.small)
+plotshape(deathCross, "Death Cross",
+     shape.labelup, location.belowbar,
+     color     = i_trendFollowing ? color.new(color.red, 0) : color.new(color.purple, 0),
+     text      = i_trendFollowing ? "SELL" : "BUY",
+     textcolor = color.white,
+     size      = size.small)
 
 // --- REGIME CHANGE RESET -----------------------------------------------------
 // MUST run before pivot detection and BOS detection so the reset takes effect
@@ -155,14 +174,21 @@ if i_showBOSlbl
 
 chochArmed = not i_reqBOS or bosCount >= 1
 
-// BUY  regime: bearBOS = buy the dip | bullCHOCH = buy the reversal (armed)
-buyBOS    = regime == "buy" and bearBOS
-buyCHOCH  = regime == "buy" and bullCHOCH and chochArmed
+// CONTRARIAN (default):
+//   BUY  regime: bearBOS = buy the dip       | bullCHOCH = buy reversal (armed)
+//   SELL regime: bullBOS = sell into strength | bearCHOCH = sell reversal (armed)
+//
+// TREND-FOLLOWING (PEPE):
+//   BUY  regime: bullBOS = buy breakout      | bullCHOCH = buy reversal (armed)
+//   SELL regime: bearBOS = sell breakdown    | bearCHOCH = sell reversal (armed)
+//   (CHOCH signals are the same direction in both modes)
+
+buyBOS    = regime == "buy"  and (i_trendFollowing ? bullBOS : bearBOS)
+buyCHOCH  = regime == "buy"  and bullCHOCH and chochArmed
 buySignal = buyBOS or buyCHOCH
 
-// SELL regime: bullBOS = sell into strength | bearCHOCH = sell the reversal (armed)
-sellBOS    = regime == "sell" and bullBOS
-sellCHOCH  = regime == "sell" and bearCHOCH and chochArmed
+sellBOS   = regime == "sell" and (i_trendFollowing ? bearBOS : bullBOS)
+sellCHOCH = regime == "sell" and bearCHOCH and chochArmed
 sellSignal = sellBOS or sellCHOCH
 
 if buySignal or sellSignal
