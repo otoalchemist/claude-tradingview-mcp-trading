@@ -74,20 +74,14 @@ if not na(regEmaF) and not na(regEmaS)
 bgcolor(i_showBG and regime == "buy"  ? color.new(color.green, 92) : na, title="BUY Regime BG")
 bgcolor(i_showBG and regime == "sell" ? color.new(color.red,   92) : na, title="SELL Regime BG")
 
-// Cross labels: contrarian shows golden=SELL (gold label), death=BUY (purple label)
-//               trend-following flips: golden=BUY (lime label), death=SELL (red label)
-plotshape(goldenCross, "Golden Cross",
-     shape.labeldown, location.abovebar,
-     color     = i_trendFollowing ? color.new(color.lime, 0) : color.rgb(255, 215, 0),
-     text      = i_trendFollowing ? "BUY" : "SELL",
-     textcolor = color.black,
-     size      = size.small)
-plotshape(deathCross, "Death Cross",
-     shape.labelup, location.belowbar,
-     color     = i_trendFollowing ? color.new(color.red, 0) : color.new(color.purple, 0),
-     text      = i_trendFollowing ? "SELL" : "BUY",
-     textcolor = color.white,
-     size      = size.small)
+// Cross labels — plotshape `text` must be a const string so we use two calls per cross,
+// one for each mode, with the condition gating which one actually fires.
+// Contrarian (default): golden=SELL (gold), death=BUY (purple)
+plotshape(not i_trendFollowing and goldenCross, "Golden Cross (SELL)", shape.labeldown, location.abovebar, color=color.rgb(255, 215, 0),        text="SELL", textcolor=color.black, size=size.small)
+plotshape(not i_trendFollowing and deathCross,  "Death Cross  (BUY)",  shape.labelup,   location.belowbar, color=color.new(color.purple, 0),    text="BUY",  textcolor=color.white, size=size.small)
+// Trend-following (PEPE): golden=BUY (lime), death=SELL (red)
+plotshape(i_trendFollowing and goldenCross, "Golden Cross (BUY)",  shape.labeldown, location.abovebar, color=color.new(color.lime, 0),           text="BUY",  textcolor=color.black, size=size.small)
+plotshape(i_trendFollowing and deathCross,  "Death Cross  (SELL)", shape.labelup,   location.belowbar, color=color.new(color.red,  0),           text="SELL", textcolor=color.white, size=size.small)
 
 // --- REGIME CHANGE RESET -----------------------------------------------------
 // MUST run before pivot detection and BOS detection so the reset takes effect
