@@ -18,7 +18,7 @@
 //                  % of regime-start crypto qty per BOS signal — UNLIMITED slots
 //   CHOCH        : continues scale (same per-slot %; no all-in) — BOS-only for BTC/ETH/LINK (no CHOCH trades)
 //
-// REPORTS  : 6-hour check-in + EOD at 23:55  (Pacific Time)  via Telegram
+// REPORTS  : EOD at 23:55 UTC — performance + daily moves + news headlines
 // COMMANDS : /status  /report  /trades  /help  (reply in Telegram chat)
 // STATE    : craig-state-{SYMBOL}.json  (saved after every bar for crash safety)
 // TRADES   : craig-accum-trades.jsonl   (append-only trade log)
@@ -1091,31 +1091,80 @@ async function processSymbol(symbol) {
 }
 
 // ── Periodic reporting ────────────────────────────────────────────────────────
-// Report state persisted to disk so a bot restart within a 6h window
-// does not fire a duplicate report on the very next scan.
+// EOD report at 23:55 UTC — sent once per calendar day.
+// State persisted to disk so a restart near midnight never fires a duplicate.
 const REPORT_STATE_FILE = path.join(STATE_DIR, "craig-accum-report-state.json");
 
 function loadReportState() {
   try {
     if (existsSync(REPORT_STATE_FILE)) {
       const s = JSON.parse(readFileSync(REPORT_STATE_FILE, "utf8"));
-      return { lastSixHourSummaryHour: s.lastSixHourSummaryHour ?? -1,
-               lastEodSentDate:        s.lastEodSentDate        ?? "" };
+      return { lastEodSentDate: s.lastEodSentDate ?? "" };
     }
   } catch {}
-  return { lastSixHourSummaryHour: -1, lastEodSentDate: "" };
+  return { lastEodSentDate: "" };
 }
 
 function saveReportState() {
   try {
     writeFileSync(REPORT_STATE_FILE,
-      JSON.stringify({ lastSixHourSummaryHour, lastEodSentDate }, null, 2));
+      JSON.stringify({ lastEodSentDate }, null, 2));
   } catch (e) { console.error("[Report] Failed to save report state:", e.message); }
 }
 
 const _rs = loadReportState();
-let lastSixHourSummaryHour = _rs.lastSixHourSummaryHour;
-let lastEodSentDate        = _rs.lastEodSentDate;
+let lastEodSentDate = _rs.lastEodSentDate;
+
+// ── Fetch 24h price change for all symbols ────────────────────────────────────
+async function fetchDailyChanges() {
+  const changes = {};
+  for (const sym of SYMBOLS) {
+    try {
+      const now   = Math.floor(Date.now() / 1000);
+      const url   = `https://api.coinbase.com/api/v3/brokerage/market/products/${sym}/candles` +
+                    `?granularity=ONE_DAY&start=${now - 2 * 86400}&end=${now}`;
+      const res   = await fetch(url, { headers: { "User-Agent": "craig-bot/2.0" }, signal: AbortSignal.timeout(8000) });
+      if (!res.ok) continue;
+      const j       = await res.json();
+      const candles = (j.candles ?? j).sort((a, b) => +b.start - +a.start);
+      if (candles.length >= 2) {
+        const todayClose = +candles[0].close;
+        const prevClose  = +candles[1].close;
+        changes[sym] = { pct: (todayClose - prevClose) / prevClose * 100, price: todayClose };
+      }
+    } catch { /* skip on error */ }
+    await new Promise(r => setTimeout(r, 200));
+  }
+  return changes;
+}
+
+// ── Fetch top crypto news headlines from RSS ──────────────────────────────────
+async function fetchCryptoNews() {
+  const sources = [
+    { name: "CoinDesk",      url: "https://www.coindesk.com/arc/outboundfeeds/rss/" },
+    { name: "CoinTelegraph", url: "https://cointelegraph.com/rss" },
+  ];
+  for (const src of sources) {
+    try {
+      const res = await fetch(src.url, {
+        headers: { "User-Agent": "craig-bot/2.0", "Accept": "application/rss+xml, text/xml" },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) continue;
+      const xml   = await res.text();
+      const items = [];
+      const re    = /<item[^>]*>([\s\S]*?)<\/item>/g;
+      let m;
+      while ((m = re.exec(xml)) !== null && items.length < 5) {
+        let title = (/<title[^>]*>([\s\S]*?)<\/title>/i.exec(m[1])?.[1] ?? "").trim();
+        title = title.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1").replace(/<[^>]+>/g, "").trim();
+        if (title.length > 8) items.push(title);
+      }
+      if (items.length >= 2) return { source: src.name, items };
+    } catch { /* try next source */ }
+  }
+  return null;
+}
 
 function buildSymbolReport(symbol) {
   let s;
@@ -1216,16 +1265,20 @@ function buildSymbolReport(symbol) {
   );
 }
 
-async function sendPortfolioReport(isEod = false) {
+async function sendPortfolioReport() {
   const now     = new Date();
   const timeStr = ptStr(now);
+  const dateStr = ptDate(now);
 
+  // ── Part 1: portfolio performance ───────────────────────────────────────────
   let totalPortVal = 0;
   const symbolBlocks = [];
+  const stateCache   = {};  // reuse for analysis section
 
   for (const symbol of SYMBOLS) {
     try {
       const s = loadState(symbol);
+      stateCache[symbol] = s;
       const p = s.lastPrice || 0;
       totalPortVal += s.initialized ? s.cash + s.cryptoQty * p : INITIAL_CAPITAL;
       symbolBlocks.push(buildSymbolReport(symbol));
@@ -1236,19 +1289,115 @@ async function sendPortfolioReport(isEod = false) {
   }
 
   const totalStart  = SYMBOLS.length * INITIAL_CAPITAL;
-  const totalPnlPct = ((totalPortVal - totalStart) / totalStart * 100);
+  const totalPnlPct = (totalPortVal - totalStart) / totalStart * 100;
   const totalSign   = totalPnlPct >= 0 ? "+" : "";
 
-  const header = isEod
-    ? `📊 <b>END OF DAY  ─  ${ptDate(now)}</b>\n${timeStr}`
-    : `📈 <b>6H CHECK-IN  ─  ${timeStr}</b>`;
-
+  const header = `📊 <b>END OF DAY  ─  ${dateStr}</b>\n${timeStr}`;
   const footer =
     `\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
     `<b>TOTAL: $${totalPortVal.toFixed(2)} / $${totalStart}  (${totalSign}${totalPnlPct.toFixed(2)}%)</b>`;
 
   await sendTelegram(header + "\n\n" + symbolBlocks.join("\n\n") + footer);
-  console.log(`[Report] Sent ${isEod ? "EOD" : "6h"} report @ ${timeStr}`);
+
+  // ── Part 2: daily analysis ──────────────────────────────────────────────────
+  // Fetch 24h changes and news in parallel
+  const [dailyChanges, news] = await Promise.allSettled([
+    fetchDailyChanges(),
+    fetchCryptoNews(),
+  ]).then(r => r.map(x => x.status === "fulfilled" ? x.value : null));
+
+  const lines = [`🔍 <b>EOD ANALYSIS  ─  ${dateStr}</b>\n`];
+
+  // ── Daily moves per coin ───────────────────────────────────────────────────
+  if (dailyChanges && Object.keys(dailyChanges).length) {
+    lines.push(`<b>📈 24H Price Change</b>`);
+    const blackSwans = [];
+    for (const sym of SYMBOLS) {
+      const d = dailyChanges[sym];
+      if (!d) { lines.push(`  ${sym.replace("-USD","").padEnd(5)}  —`); continue; }
+      const sign  = d.pct >= 0 ? "+" : "";
+      const emoji = d.pct >= 15 ? "🚀" : d.pct >= 8 ? "📈" : d.pct >= 0 ? "🟢" :
+                    d.pct <= -15 ? "💥" : d.pct <= -8 ? "📉" : "🔴";
+      const flag  = Math.abs(d.pct) >= 8 ? "  ⚠️ notable" : "";
+      lines.push(`  ${emoji} ${sym.replace("-USD","").padEnd(5)}  ${sign}${d.pct.toFixed(2)}%${flag}`);
+      if (Math.abs(d.pct) >= 12)
+        blackSwans.push({ sym: sym.replace("-USD",""), pct: d.pct });
+    }
+    // Black swans
+    if (blackSwans.length) {
+      lines.push(`\n🚨 <b>Black Swan Alert</b>`);
+      for (const bs of blackSwans) {
+        const dir  = bs.pct > 0 ? "surge" : "crash";
+        const sign = bs.pct > 0 ? "+" : "";
+        lines.push(`  ${bs.sym}: ${sign}${bs.pct.toFixed(1)}% — extreme ${dir}. Check positions + news.`);
+      }
+    }
+  }
+
+  // ── What went right ─────────────────────────────────────────────────────────
+  const rightsLines = [], wrongsLines = [];
+  const todayDate = dateStr;
+
+  for (const symbol of SYMBOLS) {
+    const s = stateCache[symbol];
+    if (!s?.initialized) continue;
+
+    const price    = s.lastPrice || 0;
+    const portVal  = s.cash + s.cryptoQty * price;
+    const baseline = s.preExistingCryptoQty > 0 ? INITIAL_CAPITAL : (s.regimeStartCapital || INITIAL_CAPITAL);
+    const pnlPct   = (portVal - baseline) / baseline * 100;
+
+    let hodlPct = null;
+    if (s.regimeStartPrice > 0 && price > 0)
+      hodlPct = (price / s.regimeStartPrice - 1) * 100;
+    const edge = hodlPct !== null ? pnlPct - hodlPct : null;
+
+    const todayTrades = s.trades.filter(t => t.ts && ptDate(new Date(t.ts)) === todayDate);
+    const coin = symbol.replace("-USD", "");
+    const d24  = dailyChanges?.[symbol];
+
+    // Went right: positive edge, or active trading in a coin up today
+    if (edge !== null && edge > 5)
+      rightsLines.push(`  ✅ ${coin}: +${edge.toFixed(1)}% alpha over HODL in current regime`);
+    else if (todayTrades.length > 0 && d24 && d24.pct > 3)
+      rightsLines.push(`  ✅ ${coin}: ${todayTrades.length} trade${todayTrades.length>1?"s":""} executed, coin up ${d24.pct.toFixed(1)}% today`);
+    else if (s.regime === "sell" && s.cryptoQty <= 1e-8 && pnlPct > 0)
+      rightsLines.push(`  ✅ ${coin}: fully distributed in SELL regime with +${pnlPct.toFixed(1)}% gain secured`);
+
+    // Went wrong: negative edge, stale state, or no activity while coin moved hard
+    const barAgeMin = s.lastProcessedBarT ? (Date.now() - s.lastProcessedBarT) / 60_000 : 0;
+    if (s.tradingPaused)
+      wrongsLines.push(`  ⚠️ ${coin}: trading PAUSED — remember to /resume when ready`);
+    else if (barAgeMin > 30)
+      wrongsLines.push(`  ⚠️ ${coin}: last bar ${Math.round(barAgeMin)}m ago — possible data stall`);
+    else if (edge !== null && edge < -8)
+      wrongsLines.push(`  ❌ ${coin}: underperforming HODL by ${edge.toFixed(1)}% this regime`);
+    else if (d24 && d24.pct < -8 && s.regime === "buy" && s.cash < 5)
+      wrongsLines.push(`  ❌ ${coin}: down ${d24.pct.toFixed(1)}% today while fully deployed in BUY regime`);
+  }
+
+  if (rightsLines.length) {
+    lines.push(`\n<b>✅ What Went Right</b>`);
+    lines.push(...rightsLines);
+  }
+  if (wrongsLines.length) {
+    lines.push(`\n<b>⚠️ Watch List</b>`);
+    lines.push(...wrongsLines);
+  }
+  if (!rightsLines.length && !wrongsLines.length)
+    lines.push(`\n<i>No notable events — steady state.</i>`);
+
+  // ── News headlines ──────────────────────────────────────────────────────────
+  if (news?.items?.length) {
+    lines.push(`\n<b>📰 Crypto News  (${news.source})</b>`);
+    for (const headline of news.items.slice(0, 5))
+      lines.push(`  • ${headline}`);
+  } else {
+    lines.push(`\n<i>News unavailable.</i>`);
+  }
+
+  await sendTelegram(lines.join("\n"));
+  console.log(`[Report] Sent EOD report @ ${timeStr}`);
 }
 
 async function checkAndSendReports() {
@@ -1257,18 +1406,9 @@ async function checkAndSendReports() {
   const minuteUTC = now.getUTCMinutes();
   const dateStr   = now.toISOString().slice(0, 10);
 
-  // 6-hour check-ins at 00:00, 06:00, 12:00, 18:00 UTC
-  // Fire on the first scheduled scan within 10 minutes of each boundary.
-  // lastSixHourSummaryHour persists to disk — safe across restarts.
-  if (hourUTC % 6 === 0 && minuteUTC < 10 && lastSixHourSummaryHour !== hourUTC) {
-    await sendPortfolioReport(false);
-    lastSixHourSummaryHour = hourUTC;
-    saveReportState();
-  }
-
-  // End-of-day report at 23:55 UTC
+  // EOD report at 23:55 UTC — once per calendar day, safe across restarts
   if (hourUTC === 23 && minuteUTC >= 55 && lastEodSentDate !== dateStr) {
-    await sendPortfolioReport(true);
+    await sendPortfolioReport();
     lastEodSentDate = dateStr;
     saveReportState();
   }
@@ -1334,6 +1474,7 @@ async function sendPing() {
     `Buy scale : BTC=[${(SYMBOL_CONFIG["BTC-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  ETH=[${BOS_SCALE_PCT_BUY.join(",")}]%  SOL=[${(SYMBOL_CONFIG["SOL-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
     `Sell scale: BTC=[${(SYMBOL_CONFIG["BTC-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%\n` +
     (() => { try { const ps = loadState("PEPE-USD"); return `PEPE gate : ${ps.chochGate ? "🔓 OPEN" : "🔒 CLOSED"}  (regime: ${ps.regime})\n`; } catch { return ""; } })() +
+    `Report    : EOD at 23:55 UTC  (portfolio + analysis + news)\n` +
     `Instance  : <code>${BOT_INSTANCE_ID}</code>  ← if you see two IDs, a duplicate is running`
   );
 }
@@ -1523,7 +1664,7 @@ async function sendHelpMessage() {
     `AKT: 15m regime / 5m exec\n` +
     `Buy:  BTC=[${(SYMBOL_CONFIG["BTC-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  ETH=[${BOS_SCALE_PCT_BUY.join(",")}]%  SOL=[${(SYMBOL_CONFIG["SOL-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
     `Sell: BTC=[${(SYMBOL_CONFIG["BTC-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%\n\n` +
-    `⏰ Auto-reports: every 6h + EOD  (Pacific Time)`
+    `⏰ Auto-report: EOD at 23:55 UTC  (portfolio + analysis + news)`
   );
 }
 
@@ -1580,7 +1721,7 @@ async function startTelegramPoller() {
         if      (cmd === "/ping"    || cmd === "/p")  { await sendPing(); }
         else if (cmd === "/price"   || cmd === "/px") { await sendPrices(); }
         else if (cmd === "/status"  || cmd === "/s")  { await sendRegimeOverview(); }
-        else if (cmd === "/report"  || cmd === "/r")  { await sendPortfolioReport(false); }
+        else if (cmd === "/report"  || cmd === "/r")  { await sendPortfolioReport(); }
         else if (cmd === "/trades"  || cmd === "/t")  { await sendTodaysTrades(); }
         else if (cmd === "/hist"    || cmd === "/history") { await sendTradeHistory(); }
         else if (cmd === "/scan"    || cmd === "/sc") {
@@ -1828,7 +1969,7 @@ async function runCycle(manual = false) {
     printStatus();
     console.log(`  Cycle done in ${(lastScanMs / 1000).toFixed(1)}s — next scan in 5 min`);
 
-    // Send 6h / EOD reports only on scheduled scans — not manual /scan triggers
+    // Send EOD report only on scheduled scans — not manual /scan triggers
     if (!manual) await checkAndSendReports();
   } finally {
     scanInProgress = false;
@@ -1943,7 +2084,7 @@ async function main() {
     console.log(`  ${sym.padEnd(9)}  exec: ${c.exec.label.padEnd(4)}  regime: ${c.regime.label.padEnd(4)}  EMA${EMA_FAST}/${EMA_SLOW}  buy:[${buy}]%  sell:[${sell}]%`);
   }
   console.log(`  Buy (default) : [${BOS_SCALE_PCT_BUY.join(", ")}]%  │  Sell (default): [${BOS_SCALE_PCT_SELL.join(", ")}]%  │  UNLIMITED slots`);
-  console.log(`  Reports : every 6h + EOD  (Pacific Time)`);
+  console.log(`  Reports : EOD at 23:55 UTC  (portfolio + analysis + news)`);
   console.log(`  Commands: /ping /price /status /report /trades /hist /scan /btc /eth /sol /link /pepe /akt /help`);
   console.log(`  Capital : $${INITIAL_CAPITAL}/symbol  │  Scan: every 5 min`);
   console.log("═".repeat(66) + "\n");
@@ -1957,7 +2098,7 @@ async function main() {
     `AKT: 15m regime / 5m exec\n` +
     `Buy:  BTC=[${(SYMBOL_CONFIG["BTC-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  ETH=[${BOS_SCALE_PCT_BUY.join(",")}]%  SOL=[${(SYMBOL_CONFIG["SOL-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
     `Sell: BTC=[${(SYMBOL_CONFIG["BTC-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%\n` +
-    `Reports: every 6h + EOD  (Pacific Time)\n` +
+    `Reports: EOD at 23:55 UTC  (portfolio + analysis + news)\n` +
     `Commands: /ping /price /status /report /trades /hist /scan\n` +
     `Per symbol: /btc /eth /sol /link /pepe /akt  |  /help for full list\n` +
     `Capital: $${INITIAL_CAPITAL}/symbol  │  ${modeLabelTg}\n\n` +
