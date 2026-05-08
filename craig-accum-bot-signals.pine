@@ -19,15 +19,16 @@ indicator("Craig Accum Bot - Signals", overlay=true, max_labels_count=500, max_l
 //     CHOCH signals always execute (they are the gate-opener); only BOS is gated.
 //
 //   Timeframe guide (set chart TF + Regime TF input to match your symbol):
-//     BTC-USD      exec: 15m  regime: 60
+//     BTC-USD      exec: 15m  regime: 30
 //     ETH/SOL/LINK exec: 5m   regime: 30
 //     PEPE-USD     exec: 5m   regime: 60  ← Trend-Following + CHOCH Gate
 //     AKT-USD      exec: 5m   regime: 15
 //
 //   Ladder reference (matches SYMBOL_CONFIG in craig-accumulation-bot.mjs):
-//     BTC/ETH/SOL  buy: 15·15·15·15  sell:  5·10·20·40  (flat-15 / back-steep)
-//     LINK         buy: 15·15·15·15  sell: 33·33·33·33  (flat-15 / flat-33)
-//     PEPE         buy: 60·25·10·5   sell: 33·33·33·33  (front-60 / flat-33)  [TREND + CHOCH GATE]
+//     BTC          buy: 33·33·33      sell: 10·15·25·50  (flat-33 / back-mid)
+//     ETH/SOL      buy: 15·15·15·15  sell:  5·10·20·40  (flat-15 / back-steep)
+//     LINK         buy: 60·25·10·5   sell: 33·33·33·33  (front-60 / flat-33)
+//     PEPE         buy: 60·25·10·5   sell:  5·10·20·40  (front-60 / back-steep)  [TREND + CHOCH GATE]
 //     AKT          buy: 60·25·10·5   sell: 50·25·15·10  (front-60 / front-50)
 //
 //   Slot indexing: Math.min(bosCount, ladderLength-1)
@@ -35,7 +36,7 @@ indicator("Craig Accum Bot - Signals", overlay=true, max_labels_count=500, max_l
 // =============================================================================
 
 // --- INPUTS ------------------------------------------------------------------
-i_regimeTF       = input.timeframe("30",   "Regime TF  (BTC=60 | ETH/SOL/LINK=30 | PEPE=60 | AKT=15)")
+i_regimeTF       = input.timeframe("30",   "Regime TF  (BTC=30 | ETH/SOL/LINK=30 | PEPE=60 | AKT=15)")
 i_emaFast        = input.int(50,           "EMA Fast",            minval=1)
 i_emaSlow        = input.int(200,          "EMA Slow",            minval=1)
 i_swingLB        = input.int(5,            "Swing Lookback",      minval=1)
@@ -241,7 +242,7 @@ f_buyLadder(s)  =>
     s == "PEPE" or s == "AKT" ? "60·25·10·5" : "15·15·15·15"
 
 f_sellLadder(s) =>
-    s == "AKT" ? "50·25·15·10" : (s == "LINK" or s == "PEPE") ? "33·33·33·33" : "5·10·20·40"
+    s == "AKT" ? "50·25·15·10" : s == "LINK" ? "33·33·33·33" : "5·10·20·40"
 
 f_nextBuyPct(s, slot) =>
     if s == "PEPE" or s == "AKT"
@@ -252,7 +253,7 @@ f_nextBuyPct(s, slot) =>
 f_nextSellPct(s, slot) =>
     if s == "AKT"
         slot == 0 ? 50 : slot == 1 ? 25 : slot == 2 ? 15 : 10
-    else if s == "LINK" or s == "PEPE"
+    else if s == "LINK"
         33
     else
         slot == 0 ? 5 : slot == 1 ? 10 : slot == 2 ? 20 : 40
