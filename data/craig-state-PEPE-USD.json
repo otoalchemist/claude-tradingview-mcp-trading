@@ -1,6 +1,6 @@
 {
   "symbol": "PEPE-USD",
-  "execGran": "ONE_MINUTE",
+  "execGran": "FIVE_MINUTE",
   "initialized": false,
   "tradingPaused": false,
   "regime": "neutral",

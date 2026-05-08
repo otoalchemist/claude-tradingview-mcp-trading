@@ -30,7 +30,8 @@ indicator("Craig Accum Bot - Signals", overlay=true, max_labels_count=500, max_l
 //
 //   Ladder reference (matches SYMBOL_CONFIG in craig-accumulation-bot.mjs):
 //     BTC          buy: 33·33·33      sell: 10·15·25·50  (flat-33 / back-mid)
-//     ETH/SOL      buy: 15·15·15·15  sell:  5·10·20·40  (flat-15 / back-steep)
+//     ETH          buy: 15·15·15·15  sell:  5·10·20·40  (flat-15 / back-steep)
+//     SOL          buy: 60·25·10·5   sell:  5·10·20·40  (front-60 / back-steep)
 //     LINK         buy: 60·25·10·5   sell: 33·33·33·33  (front-60 / flat-33)
 //     PEPE         buy: 60·25·10·5   sell:  5·10·20·40  (front-60 / back-steep)  [TREND + CHOCH GATE]
 //     AKT          buy: 60·25·10·5   sell: 50·25·15·10  (front-60 / front-50)
@@ -54,7 +55,7 @@ i_showSwings     = input.bool(true,        "Show Swing H/L Dots",        group="
 i_showBOSlbl     = input.bool(true,        "Show BOS/CHOCH Labels",      group="Display")
 i_showGated      = input.bool(true,        "Show Gated-Out BOS (orange)", group="Display")
 i_sym            = input.string("BTC", "Symbol (for ladder display)",
-                     options=["BTC", "ETH/SOL", "LINK", "PEPE", "AKT"], group="Display")
+                     options=["BTC", "ETH", "SOL", "LINK", "PEPE", "AKT"], group="Display")
 
 // --- REGIME TF : EMA 50 / 200 ------------------------------------------------
 regEmaF = request.security(syminfo.tickerid, i_regimeTF, ta.ema(close, i_emaFast)[1], lookahead=barmerge.lookahead_on)
@@ -208,7 +209,7 @@ if i_showBOSlbl
     if actionableBuyBOS and gateOpen
         label.new(bar_index, lastSL, "BOS", color=color.new(color.teal, 20), textcolor=color.white, style=label.style_label_up, size=size.small)
     // BOS-only coins (BTC/ETH/LINK): CHOCH shown for structure context but dimmed — bot does NOT trade it
-    bosOnlyCoin = i_sym == "BTC" or i_sym == "ETH/SOL" or i_sym == "LINK"
+    bosOnlyCoin = i_sym == "BTC" or i_sym == "ETH" or i_sym == "LINK"
     if actionableBuyCHOCH
         chochColor = bosOnlyCoin ? color.new(color.green, 60) : color.new(color.green, 10)
         chochText  = bosOnlyCoin ? "CHOCH (no trade)" : "CHOCH"
@@ -250,21 +251,21 @@ if sellSignal
 // --- INFO TABLE --------------------------------------------------------------
 f_buyLadder(s)  =>
     s == "BTC"              ? "33·33·33"     :
-     s == "LINK" or s == "PEPE" or s == "AKT" ? "60·25·10·5" :
-     "15·15·15·15"   // ETH/SOL
+     s == "SOL" or s == "LINK" or s == "PEPE" or s == "AKT" ? "60·25·10·5" :
+     "15·15·15·15"   // ETH
 
 f_sellLadder(s) =>
     s == "BTC"  ? "10·15·25·50" :
      s == "AKT"  ? "50·25·15·10" :
      s == "LINK" ? "33·33·33·33" :
-     "5·10·20·40"   // ETH/SOL + PEPE
+     "5·10·20·40"   // ETH/SOL/PEPE
 
 f_nextBuyPct(s, slot) =>
     if s == "BTC"
         33
-    else if s == "LINK" or s == "PEPE" or s == "AKT"
+    else if s == "SOL" or s == "LINK" or s == "PEPE" or s == "AKT"
         slot == 0 ? 60 : slot == 1 ? 25 : slot == 2 ? 10 : 5
-    else  // ETH/SOL
+    else  // ETH
         15
 
 f_nextSellPct(s, slot) =>
@@ -274,7 +275,7 @@ f_nextSellPct(s, slot) =>
         slot == 0 ? 50 : slot == 1 ? 25 : slot == 2 ? 15 : 10
     else if s == "LINK"
         33
-    else  // ETH/SOL + PEPE
+    else  // ETH/SOL/PEPE
         slot == 0 ? 5 : slot == 1 ? 10 : slot == 2 ? 20 : 40
 
 // Table: 11 rows — Regime, Exec TF, Regime TF, EMA50, EMA200, Signals, Symbol, Buy%, Sell%, Next, Gate

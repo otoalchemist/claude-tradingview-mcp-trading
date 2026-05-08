@@ -12,7 +12,7 @@
 //
 //   Death cross  → BUY  regime: scale-in  on each bearish BOS / bullish CHOCH
 //   Golden cross → SELL regime: scale-out on each bullish BOS / bearish CHOCH
-//   Buy  ladder  : BTC [33,33,33]%  ETH/SOL [15,15,15,15]%  LINK [60,25,10,5]%  PEPE [60,25,10,5]%  AKT [60,25,10,5]%
+//   Buy  ladder  : BTC [33,33,33]%  ETH [15,15,15,15]%  SOL [60,25,10,5]%  LINK [60,25,10,5]%  PEPE [60,25,10,5]%  AKT [60,25,10,5]%
 //                  % of regime-start capital per BOS signal — UNLIMITED slots (slot 4+ repeats last)
 //   Sell ladder  : BTC [10,15,25,50]%  ETH/SOL [5,10,20,40]%  LINK [33,33,33,33]%  PEPE [5,10,20,40]%  AKT [50,25,15,10]%
 //                  % of regime-start crypto qty per BOS signal — UNLIMITED slots
@@ -157,6 +157,7 @@ const SYMBOL_CONFIG = {
   "SOL-USD": {
     exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
     regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 600, ms: THIRTY_MIN_MS,  label: "30m" },
+    buyLadder:  [60, 25, 10,  5],    // front-60 — deploy fast; +4.3% at 60d / +5.4% at 90d vs flat-15
   },
   "LINK-USD": {
     exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
@@ -1330,7 +1331,7 @@ async function sendPing() {
     `Symbols   : ${SYMBOLS.length}  [${SYMBOLS.map(s => s.replace("-USD","")).join(" · ")}]\n` +
     `Capital   : $${INITIAL_CAPITAL}/sym  ($${SYMBOLS.length * INITIAL_CAPITAL} total)\n` +
     `Regimes   : BTC=30m  ETH/SOL/LINK=30m  PEPE=1h  AKT=15m\n` +
-    `Buy scale : BTC=[${(SYMBOL_CONFIG["BTC-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  ETH/SOL=[${BOS_SCALE_PCT_BUY.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
+    `Buy scale : BTC=[${(SYMBOL_CONFIG["BTC-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  ETH=[${BOS_SCALE_PCT_BUY.join(",")}]%  SOL=[${(SYMBOL_CONFIG["SOL-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
     `Sell scale: BTC=[${(SYMBOL_CONFIG["BTC-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%\n` +
     (() => { try { const ps = loadState("PEPE-USD"); return `PEPE gate : ${ps.chochGate ? "🔓 OPEN" : "🔒 CLOSED"}  (regime: ${ps.regime})\n`; } catch { return ""; } })() +
     `Instance  : <code>${BOT_INSTANCE_ID}</code>  ← if you see two IDs, a duplicate is running`
@@ -1520,8 +1521,8 @@ async function sendHelpMessage() {
     `ETH · SOL · LINK: 30m regime / 5m exec\n` +
     `PEPE: 1h regime / 5m exec  [TREND + BTC gate]\n` +
     `AKT: 15m regime / 5m exec\n` +
-    `Buy:  BTC/ETH/SOL=[${BOS_SCALE_PCT_BUY.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
-    `Sell: BTC/ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%\n\n` +
+    `Buy:  BTC=[${(SYMBOL_CONFIG["BTC-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  ETH=[${BOS_SCALE_PCT_BUY.join(",")}]%  SOL=[${(SYMBOL_CONFIG["SOL-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
+    `Sell: BTC=[${(SYMBOL_CONFIG["BTC-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%\n\n` +
     `⏰ Auto-reports: every 6h + EOD  (Pacific Time)`
   );
 }
@@ -1954,7 +1955,7 @@ async function main() {
     `ETH · SOL · LINK: 30m regime / 5m exec\n` +
     `PEPE: 1h regime / 5m exec  [TREND + BTC gate]\n` +
     `AKT: 15m regime / 5m exec\n` +
-    `Buy:  BTC=[${(SYMBOL_CONFIG["BTC-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  ETH/SOL=[${BOS_SCALE_PCT_BUY.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
+    `Buy:  BTC=[${(SYMBOL_CONFIG["BTC-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  ETH=[${BOS_SCALE_PCT_BUY.join(",")}]%  SOL=[${(SYMBOL_CONFIG["SOL-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
     `Sell: BTC=[${(SYMBOL_CONFIG["BTC-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%\n` +
     `Reports: every 6h + EOD  (Pacific Time)\n` +
     `Commands: /ping /price /status /report /trades /hist /scan\n` +
