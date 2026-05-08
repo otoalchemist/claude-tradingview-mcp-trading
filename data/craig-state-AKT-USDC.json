@@ -1,6 +1,6 @@
 {
-  "symbol": "BTC-USD",
-  "execGran": "FIFTEEN_MINUTE",
+  "symbol": "AKT-USDC",
+  "execGran": "FIVE_MINUTE",
   "initialized": false,
   "tradingPaused": false,
   "regime": "neutral",

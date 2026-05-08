@@ -1,5 +1,5 @@
 {
-  "symbol": "LINK-USD",
+  "symbol": "LINK-USDC",
   "execGran": "FIVE_MINUTE",
   "initialized": false,
   "tradingPaused": false,

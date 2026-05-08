@@ -1,6 +1,6 @@
 {
-  "symbol": "SOL-USD",
-  "execGran": "FIVE_MINUTE",
+  "symbol": "BTC-USDC",
+  "execGran": "FIFTEEN_MINUTE",
   "initialized": false,
   "tradingPaused": false,
   "regime": "neutral",

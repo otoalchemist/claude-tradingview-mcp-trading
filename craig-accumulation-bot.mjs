@@ -3,12 +3,12 @@
 // craig-accumulation-bot.mjs  — Live Trading  (v2)
 //
 // STRATEGY (per-symbol timeframes):
-//   BTC-USD  : 30m EMA50/200 regime  →  15m BOS/CHOCH execution
-//   ETH-USD  : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
-//   SOL-USD  : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
-//   LINK-USD : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
-//   PEPE-USD :  1h EMA50/200 regime  →   5m BOS/CHOCH execution  [TREND-FOLLOWING + BTC gate]
-//   AKT-USD  : 15m EMA50/200 regime  →   5m BOS/CHOCH execution
+//   BTC-USDC  : 30m EMA50/200 regime  →  15m BOS/CHOCH execution
+//   ETH-USDC  : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
+//   SOL-USDC  : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
+//   LINK-USDC : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
+//   PEPE-USDC :  1h EMA50/200 regime  →   5m BOS/CHOCH execution  [TREND-FOLLOWING + BTC gate]
+//   AKT-USDC  : 15m EMA50/200 regime  →   5m BOS/CHOCH execution
 //
 //   Death cross  → BUY  regime: scale-in  on each bearish BOS / bullish CHOCH
 //   Golden cross → SELL regime: scale-out on each bullish BOS / bearish CHOCH
@@ -95,7 +95,7 @@ const THIRTY_MIN_MS  = 1_800_000;
 const FIFTEEN_MIN_MS =   900_000;
 
 // ── Config ────────────────────────────────────────────────────────────────────
-const SYMBOLS              = ["BTC-USD", "ETH-USD", "SOL-USD", "LINK-USD", "PEPE-USD", "AKT-USD"];
+const SYMBOLS              = ["BTC-USDC", "ETH-USDC", "SOL-USDC", "LINK-USDC", "PEPE-USDC", "AKT-USDC"];
 const INITIAL_CAPITAL      = 100;
 const EMA_FAST             = 50;
 const EMA_SLOW             = 200;
@@ -122,44 +122,44 @@ const LIVE_TRADING = process.env.LIVE_TRADING === "true";
 // quote_size (BUY): how many decimal places the USD amount may have.
 // Conservative defaults; fetchProductPrecisions() replaces these with real values.
 const BASE_SIZE_DECIMALS = {
-  "BTC-USD":  8,
-  "ETH-USD":  8,
-  "SOL-USD":  3,   // Coinbase SOL base_increment = 0.001
-  "LINK-USD": 2,   // Coinbase LINK base_increment = 0.01
-  "PEPE-USD": 0,   // integer PEPE only (base_increment = 1)
-  "AKT-USD":  2,   // conservative default; overwritten at startup by fetchProductPrecisions
+  "BTC-USDC":  8,
+  "ETH-USDC":  8,
+  "SOL-USDC":  3,   // Coinbase SOL base_increment = 0.001
+  "LINK-USDC": 2,   // Coinbase LINK base_increment = 0.01
+  "PEPE-USDC": 0,   // integer PEPE only (base_increment = 1)
+  "AKT-USDC":  2,   // conservative default; overwritten at startup by fetchProductPrecisions
 };
 const QUOTE_SIZE_DECIMALS = {
-  "BTC-USD":  2,
-  "ETH-USD":  2,
-  "SOL-USD":  2,
-  "LINK-USD": 2,
-  "PEPE-USD": 2,
-  "AKT-USD":  2,
+  "BTC-USDC":  2,
+  "ETH-USDC":  2,
+  "SOL-USDC":  2,
+  "LINK-USDC": 2,
+  "PEPE-USDC": 2,
+  "AKT-USDC":  2,
 };
 
 // Per-symbol execution / regime config
 // sellLadder (optional): overrides global BOS_SCALE_PCT_SELL for this symbol only.
 // buyLadder  (optional): overrides global BOS_SCALE_PCT_BUY  for this symbol only.
 const SYMBOL_CONFIG = {
-  "BTC-USD": {
+  "BTC-USDC": {
     exec:      { gran: "FIFTEEN_MINUTE", secs:  900, bars: 250, label: "15m" },
     regime:    { gran: "THIRTY_MINUTE",  secs: 1800, bars: 600, ms: THIRTY_MIN_MS, label: "30m" },
     buyLadder:  [33, 33, 33],        // flat-33 — fewer bigger entries beat flat-15 DCA across all periods
     sellLadder: [10, 15, 25, 50],    // back-mid — hold most for the full rally, better than back-steep at 90/180d
     bosOnly:    true,                // BOS-only: no CHOCH trades (+3.5-4.2% at 90/180d vs BOS+CHOCH)
   },
-  "ETH-USD": {
+  "ETH-USDC": {
     exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
     regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 600, ms: THIRTY_MIN_MS, label: "30m" },
     bosOnly: true,                   // BOS-only: +4.23% at 180d vs BOS+CHOCH
   },
-  "SOL-USD": {
+  "SOL-USDC": {
     exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
     regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 600, ms: THIRTY_MIN_MS,  label: "30m" },
     buyLadder:  [60, 25, 10,  5],    // front-60 — deploy fast; +4.3% at 60d / +5.4% at 90d vs flat-15
   },
-  "LINK-USD": {
+  "LINK-USDC": {
     exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
     regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 600, ms: THIRTY_MIN_MS,  label: "30m" },
     buyLadder:  [60, 25, 10,  5],    // front-60 — deploy fast; LINK moves hard, wins all periods vs flat-15
@@ -171,7 +171,7 @@ const SYMBOL_CONFIG = {
   //   BTC gate: buy signals suppressed when BTC EMA50 < EMA200 (crypto bear market)
   //   buy=front-60 — fast deployment when narrative ignites; wins 60/90/180d
   //   sell=back-steep — let winners run; +10.86% at 180d vs flat-33, better MaxDD
-  "PEPE-USD": {
+  "PEPE-USDC": {
     exec:           { gran: "FIVE_MINUTE", secs:  300, bars: 300, label: "5m"  },
     regime:         { gran: "ONE_HOUR",    secs: 3600, bars: 600, ms: HOUR_MS, label: "1h" },
     buyLadder:      [60, 25, 10,  5],  // front-60 — deploy fast when narrative ignites
@@ -182,7 +182,7 @@ const SYMBOL_CONFIG = {
   },
   // AKT: buy=front-60 (#1 both periods, +23.79% gain vs flat-33 in 90d)
   //      sell=front-50 (#1 in 90d) / front-40 (#1 in 180d) → using front-50 as it wins 90d by larger margin
-  "AKT-USD": {
+  "AKT-USDC": {
     exec:   { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
     regime: { gran: "FIFTEEN_MINUTE", secs:  900, bars: 600, ms: FIFTEEN_MIN_MS, label: "15m" },
     buyLadder:  [60, 25, 10,  5],  // front-60 — deploy fast; AKT moves hard when it moves (+23% vs flat-33)
@@ -257,11 +257,11 @@ async function registerBotCommands() {
     { command: "setcryptoqty",   description: "Force-set cryptoQty: /setcryptoqty eth 0.031" },
     { command: "setpreexisting", description: "Fix pre-existing balance offset: /setpreexisting link 0" },
     { command: "reconcile",     description: "Full state recovery after bad re-init: /reconcile eth" },
-    { command: "btc",    description: "BTC-USD snapshot" },
-    { command: "eth",    description: "ETH-USD snapshot" },
-    { command: "sol",    description: "SOL-USD snapshot" },
-    { command: "link",   description: "LINK-USD snapshot" },
-    { command: "pepe",   description: "PEPE-USD snapshot" },
+    { command: "btc",    description: "BTC-USDC snapshot" },
+    { command: "eth",    description: "ETH-USDC snapshot" },
+    { command: "sol",    description: "SOL-USDC snapshot" },
+    { command: "link",   description: "LINK-USDC snapshot" },
+    { command: "pepe",   description: "PEPE-USDC snapshot" },
     { command: "help",   description: "Full command list + strategy info" },
   ];
   try {
@@ -408,12 +408,13 @@ async function waitForFill(orderId, timeoutMs = 12_000) {
 }
 
 async function fetchCoinbasePosition(symbol) {
-  const currency = symbol.replace("-USD", "");
+  const currency = symbol.replace("-USDC", "");
   const json     = await cbFetch("GET", "/api/v3/brokerage/accounts?limit=250");
   const accounts = json.accounts ?? [];
 
+  // Quote currency is USDC — only sum USDC accounts (not fiat USD)
   const usdTotal = accounts
-    .filter(a => a.currency === "USD" || a.currency === "USDC")
+    .filter(a => a.currency === "USDC")
     .reduce((s, a) => s + parseFloat(a.available_balance?.value ?? 0), 0);
 
   // Sum ALL accounts for this currency (Coinbase can have multiple sub-accounts / portfolios).
@@ -637,7 +638,7 @@ function loadState(symbol) {
     // existing exchange balance as pre-existing, breaking buy sizing and portfolio value.
     console.error(`[${symbol}] State file corrupt — falling back to fresh state: ${e.message}`);
     if (LIVE_TRADING) {
-      sendTelegram(`🚨 <b>${symbol}</b> state file corrupted (${e.message})\nFalling back to fresh state — run <code>/reconcile ${symbol.replace("-USD","")}</code> after first scan to restore correct balances.`).catch(() => {});
+      sendTelegram(`🚨 <b>${symbol}</b> state file corrupted (${e.message})\nFalling back to fresh state — run <code>/reconcile ${symbol.replace("-USDC","")}</code> after first scan to restore correct balances.`).catch(() => {});
     }
     return makeFreshState(symbol);
   }
@@ -758,7 +759,7 @@ async function processSymbol(symbol) {
         // the balance as pre-existing so the user can correct with /setpreexisting + /reconcile.
         // For a true first start the user should have 0 or known pre-existing balance.
         if (pos.cryptoQty * lastBar.c > INITIAL_CAPITAL * 0.05) {
-          const symShort = symbol.replace("-USD", "");
+          const symShort = symbol.replace("-USDC", "");
           await sendTelegram(
             `⚠️ <b>${symbol}</b> initializing with ${fQty(pos.cryptoQty)} on exchange ($${(pos.cryptoQty * lastBar.c).toFixed(2)}).\n` +
             `If this was <b>bot-managed</b> crypto (not pre-existing), run:\n` +
@@ -965,7 +966,7 @@ async function processSymbol(symbol) {
       // btcState.regime === "sell" → BTC golden cross → EMA50 > EMA200 → gate open.
       let btcGateOpen = true;
       if (cfg.btcGate) {
-        const btcState = loadState("BTC-USD");
+        const btcState = loadState("BTC-USDC");
         btcGateOpen = btcState.regime === "sell";
       }
 
@@ -1314,14 +1315,14 @@ async function sendPortfolioReport() {
     const blackSwans = [];
     for (const sym of SYMBOLS) {
       const d = dailyChanges[sym];
-      if (!d) { lines.push(`  ${sym.replace("-USD","").padEnd(5)}  —`); continue; }
+      if (!d) { lines.push(`  ${sym.replace("-USDC","").padEnd(5)}  —`); continue; }
       const sign  = d.pct >= 0 ? "+" : "";
       const emoji = d.pct >= 15 ? "🚀" : d.pct >= 8 ? "📈" : d.pct >= 0 ? "🟢" :
                     d.pct <= -15 ? "💥" : d.pct <= -8 ? "📉" : "🔴";
       const flag  = Math.abs(d.pct) >= 8 ? "  ⚠️ notable" : "";
-      lines.push(`  ${emoji} ${sym.replace("-USD","").padEnd(5)}  ${sign}${d.pct.toFixed(2)}%${flag}`);
+      lines.push(`  ${emoji} ${sym.replace("-USDC","").padEnd(5)}  ${sign}${d.pct.toFixed(2)}%${flag}`);
       if (Math.abs(d.pct) >= 12)
-        blackSwans.push({ sym: sym.replace("-USD",""), pct: d.pct });
+        blackSwans.push({ sym: sym.replace("-USDC",""), pct: d.pct });
     }
     // Black swans
     if (blackSwans.length) {
@@ -1353,7 +1354,7 @@ async function sendPortfolioReport() {
     const edge = hodlPct !== null ? pnlPct - hodlPct : null;
 
     const todayTrades = s.trades.filter(t => t.ts && ptDate(new Date(t.ts)) === todayDate);
-    const coin = symbol.replace("-USD", "");
+    const coin = symbol.replace("-USDC", "");
     const d24  = dailyChanges?.[symbol];
 
     // Went right: positive edge, or active trading in a coin up today
@@ -1468,12 +1469,12 @@ async function sendPing() {
     `Uptime    : ${uptime}\n` +
     `Last scan : ${lastStr}\n` +
     `Next scan : ~${nextStr}\n` +
-    `Symbols   : ${SYMBOLS.length}  [${SYMBOLS.map(s => s.replace("-USD","")).join(" · ")}]\n` +
+    `Symbols   : ${SYMBOLS.length}  [${SYMBOLS.map(s => s.replace("-USDC","")).join(" · ")}]\n` +
     `Capital   : $${INITIAL_CAPITAL}/sym  ($${SYMBOLS.length * INITIAL_CAPITAL} total)\n` +
     `Regimes   : BTC=30m  ETH/SOL/LINK=30m  PEPE=1h  AKT=15m\n` +
-    `Buy scale : BTC=[${(SYMBOL_CONFIG["BTC-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  ETH=[${BOS_SCALE_PCT_BUY.join(",")}]%  SOL=[${(SYMBOL_CONFIG["SOL-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
-    `Sell scale: BTC=[${(SYMBOL_CONFIG["BTC-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%\n` +
-    (() => { try { const ps = loadState("PEPE-USD"); return `PEPE gate : ${ps.chochGate ? "🔓 OPEN" : "🔒 CLOSED"}  (regime: ${ps.regime})\n`; } catch { return ""; } })() +
+    `Buy scale : BTC=[${(SYMBOL_CONFIG["BTC-USDC"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  ETH=[${BOS_SCALE_PCT_BUY.join(",")}]%  SOL=[${(SYMBOL_CONFIG["SOL-USDC"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USDC"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USDC"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USDC"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
+    `Sell scale: BTC=[${(SYMBOL_CONFIG["BTC-USDC"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USDC"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USDC"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USDC"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%\n` +
+    (() => { try { const ps = loadState("PEPE-USDC"); return `PEPE gate : ${ps.chochGate ? "🔓 OPEN" : "🔒 CLOSED"}  (regime: ${ps.regime})\n`; } catch { return ""; } })() +
     `Report    : EOD at 23:55 UTC  (portfolio + analysis + news)\n` +
     `Instance  : <code>${BOT_INSTANCE_ID}</code>  ← if you see two IDs, a duplicate is running`
   );
@@ -1485,7 +1486,7 @@ async function sendPrices() {
       const s   = loadState(sym);
       const cfg = SYMBOL_CONFIG[sym];
       const icon  = s.regime === "buy" ? "☠️" : s.regime === "sell" ? "⭐" : "⏸ ";
-      const name  = sym.replace("-USD","").padEnd(5);
+      const name  = sym.replace("-USDC","").padEnd(5);
       const price = fPrice(s.lastPrice || 0).padStart(15);
       const reg   = s.regime.toUpperCase().padEnd(7);
       return `${icon} ${name} ${price}  [${reg}]  ${cfg.exec.label}/${cfg.regime.label}`;
@@ -1505,7 +1506,7 @@ async function sendRegimeOverview() {
       const val   = s.cash + s.cryptoQty * price;
       totalVal   += val;
       const icon  = s.regime === "buy" ? "☠️" : s.regime === "sell" ? "⭐" : "⏸ ";
-      const name  = sym.replace("-USD","").padEnd(5);
+      const name  = sym.replace("-USDC","").padEnd(5);
       const reg   = s.regime.toUpperCase().padEnd(7);
       const ovBaseline = (s.preExistingCryptoQty > 0)
         ? INITIAL_CAPITAL
@@ -1556,7 +1557,7 @@ async function sendTradeHistory() {
   }
   const rows = recent.map(t => {
     const dt   = `${ptDate(new Date(t.t)).slice(5)} ${ptTime(new Date(t.t))}`;
-    const sym  = t.symbol.replace("-USD","").padEnd(5);
+    const sym  = t.symbol.replace("-USDC","").padEnd(5);
     const icon = t.type.includes("buy") ? "🟢" : "🔴";
     const side = t.type === "scaled_buy"  ? `B#${t.bosNum} BOS  `
                : t.type === "choch_buy"   ? `B#${t.bosNum} CHOCH`
@@ -1577,9 +1578,9 @@ function resolveSymbol(arg) {
   if (!arg) return [];
   const a = arg.toUpperCase();
   if (a === "ALL") return [...SYMBOLS];
-  // exact match first (e.g. "AKT-USD")
+  // exact match first (e.g. "AKT-USDC")
   if (SYMBOLS.includes(a)) return [a];
-  // short name match: "BTC" → "BTC-USD"
+  // short name match: "BTC" → "BTC-USDC"
   const hit = SYMBOLS.find(s => s.startsWith(a + "-") || s === a);
   return hit ? [hit] : [];
 }
@@ -1600,9 +1601,9 @@ async function cmdPauseSymbol(arg) {
     }
   }
   if (!changed.length) {
-    await sendTelegram(`ℹ️ ${targets.map(s => s.replace("-USD","")).join(", ")} already paused.`);
+    await sendTelegram(`ℹ️ ${targets.map(s => s.replace("-USDC","")).join(", ")} already paused.`);
   } else {
-    const names = changed.map(s => s.replace("-USD","")).join(", ");
+    const names = changed.map(s => s.replace("-USDC","")).join(", ");
     await sendTelegram(`⏸ <b>${names}</b> trading PAUSED.\nSignals will be skipped until you send /resume ${arg.toLowerCase()}`);
     console.log(`[Telegram] PAUSED: ${changed.join(", ")}`);
   }
@@ -1624,9 +1625,9 @@ async function cmdResumeSymbol(arg) {
     }
   }
   if (!changed.length) {
-    await sendTelegram(`ℹ️ ${targets.map(s => s.replace("-USD","")).join(", ")} already active.`);
+    await sendTelegram(`ℹ️ ${targets.map(s => s.replace("-USDC","")).join(", ")} already active.`);
   } else {
-    const names = changed.map(s => s.replace("-USD","")).join(", ");
+    const names = changed.map(s => s.replace("-USDC","")).join(", ");
     await sendTelegram(`▶️ <b>${names}</b> trading RESUMED.\nSignals active again.`);
     console.log(`[Telegram] RESUMED: ${changed.join(", ")}`);
   }
@@ -1662,8 +1663,8 @@ async function sendHelpMessage() {
     `ETH · SOL · LINK: 30m regime / 5m exec\n` +
     `PEPE: 1h regime / 5m exec  [TREND + BTC gate]\n` +
     `AKT: 15m regime / 5m exec\n` +
-    `Buy:  BTC=[${(SYMBOL_CONFIG["BTC-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  ETH=[${BOS_SCALE_PCT_BUY.join(",")}]%  SOL=[${(SYMBOL_CONFIG["SOL-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
-    `Sell: BTC=[${(SYMBOL_CONFIG["BTC-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%\n\n` +
+    `Buy:  BTC=[${(SYMBOL_CONFIG["BTC-USDC"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  ETH=[${BOS_SCALE_PCT_BUY.join(",")}]%  SOL=[${(SYMBOL_CONFIG["SOL-USDC"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USDC"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USDC"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USDC"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
+    `Sell: BTC=[${(SYMBOL_CONFIG["BTC-USDC"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USDC"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USDC"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USDC"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%\n\n` +
     `⏰ Auto-report: EOD at 23:55 UTC  (portfolio + analysis + news)`
   );
 }
@@ -1713,7 +1714,7 @@ async function startTelegramPoller() {
         console.log(`[Telegram] Command received: "${text}"`);
 
         // Per-symbol shortcuts
-        const SHORTCUTS = { "/btc":"BTC-USD", "/eth":"ETH-USD", "/sol":"SOL-USD", "/link":"LINK-USD", "/pepe":"PEPE-USD", "/akt":"AKT-USD" };
+        const SHORTCUTS = { "/btc":"BTC-USDC", "/eth":"ETH-USDC", "/sol":"SOL-USDC", "/link":"LINK-USDC", "/pepe":"PEPE-USDC", "/akt":"AKT-USDC" };
 
         // Parse optional argument for /pause and /resume: "/pause btc" → arg="btc"
         const [cmd, cmdArg] = text.split(/\s+/, 2);
@@ -1735,7 +1736,7 @@ async function startTelegramPoller() {
           // /setcash <symbol> <amount>  e.g. /setcash link 0
           const parts = rawText.trim().split(/\s+/);
           const symRaw = (parts[1] || "").toUpperCase();
-          const sym = symRaw.includes("-") ? symRaw : `${symRaw}-USD`;
+          const sym = symRaw.includes("-") ? symRaw : `${symRaw}-USDC`;
           const amount = parseFloat(parts[2]);
           if (!SYMBOL_CONFIG[sym] || isNaN(amount) || amount < 0) {
             await sendTelegram(`❌ Usage: /setcash &lt;symbol&gt; &lt;amount&gt;\nExample: <code>/setcash LINK 0</code>`);
@@ -1751,7 +1752,7 @@ async function startTelegramPoller() {
           // Fixes regimeStartCryptoQty when it was zeroed out at init (sell-regime init bug).
           const parts  = rawText.trim().split(/\s+/);
           const symRaw = (parts[1] || "").toUpperCase();
-          const sym    = symRaw.includes("-") ? symRaw : `${symRaw}-USD`;
+          const sym    = symRaw.includes("-") ? symRaw : `${symRaw}-USDC`;
           const qty    = parseFloat(parts[2]);
           if (!SYMBOL_CONFIG[sym] || isNaN(qty) || qty < 0) {
             await sendTelegram(`❌ Usage: /setregimeqty &lt;symbol&gt; &lt;qty&gt;\nExample: <code>/setregimeqty LINK 10.93</code>\n\nSets regimeStartCryptoQty — the baseline used to calculate sell ladder sizes.`);
@@ -1775,7 +1776,7 @@ async function startTelegramPoller() {
           // Coinbase's portfolio view.
           const parts  = rawText.trim().split(/\s+/);
           const symRaw = (parts[1] || "").toUpperCase();
-          const sym    = symRaw.includes("-") ? symRaw : `${symRaw}-USD`;
+          const sym    = symRaw.includes("-") ? symRaw : `${symRaw}-USDC`;
           const qty    = parseFloat(parts[2]);
           if (!SYMBOL_CONFIG[sym] || isNaN(qty) || qty < 0) {
             await sendTelegram(`❌ Usage: /setcryptoqty &lt;symbol&gt; &lt;qty&gt;\nExample: <code>/setcryptoqty ETH 0.031</code>\n\nDirectly sets cryptoQty — use when /reconcile shows wrong balance from Coinbase.`);
@@ -1801,7 +1802,7 @@ async function startTelegramPoller() {
           // Use when migration wrongly classified bot-managed crypto as pre-existing.
           const parts  = rawText.trim().split(/\s+/);
           const symRaw = (parts[1] || "").toUpperCase();
-          const sym    = symRaw.includes("-") ? symRaw : `${symRaw}-USD`;
+          const sym    = symRaw.includes("-") ? symRaw : `${symRaw}-USDC`;
           const qty    = parseFloat(parts[2]);
           if (!SYMBOL_CONFIG[sym] || isNaN(qty) || qty < 0) {
             await sendTelegram(`❌ Usage: /setpreexisting &lt;symbol&gt; &lt;qty&gt;\nExample: <code>/setpreexisting LINK 0</code>\n\nSets preExistingCryptoQty (crypto held before bot started managing this symbol).`);
@@ -1836,7 +1837,7 @@ async function startTelegramPoller() {
           // Fetches real balance from Coinbase, corrects cryptoQty and regimeStartCapital.
           const parts  = rawText.trim().split(/\s+/);
           const symRaw = (parts[1] || "").toUpperCase();
-          const sym    = symRaw.includes("-") ? symRaw : `${symRaw}-USD`;
+          const sym    = symRaw.includes("-") ? symRaw : `${symRaw}-USDC`;
           if (!SYMBOL_CONFIG[sym]) {
             await sendTelegram(`❌ Usage: /reconcile &lt;symbol&gt;\nExample: <code>/reconcile ETH</code>`);
           } else if (!LIVE_TRADING) {
@@ -2096,8 +2097,8 @@ async function main() {
     `ETH · SOL · LINK: 30m regime / 5m exec\n` +
     `PEPE: 1h regime / 5m exec  [TREND + BTC gate]\n` +
     `AKT: 15m regime / 5m exec\n` +
-    `Buy:  BTC=[${(SYMBOL_CONFIG["BTC-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  ETH=[${BOS_SCALE_PCT_BUY.join(",")}]%  SOL=[${(SYMBOL_CONFIG["SOL-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
-    `Sell: BTC=[${(SYMBOL_CONFIG["BTC-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USD"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%\n` +
+    `Buy:  BTC=[${(SYMBOL_CONFIG["BTC-USDC"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  ETH=[${BOS_SCALE_PCT_BUY.join(",")}]%  SOL=[${(SYMBOL_CONFIG["SOL-USDC"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USDC"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USDC"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USDC"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
+    `Sell: BTC=[${(SYMBOL_CONFIG["BTC-USDC"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USDC"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USDC"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USDC"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%\n` +
     `Reports: EOD at 23:55 UTC  (portfolio + analysis + news)\n` +
     `Commands: /ping /price /status /report /trades /hist /scan\n` +
     `Per symbol: /btc /eth /sol /link /pepe /akt  |  /help for full list\n` +

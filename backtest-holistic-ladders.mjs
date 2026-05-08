@@ -16,7 +16,7 @@ const ADV_GRAN={300:"FIVE_MINUTE",900:"FIFTEEN_MINUTE",1800:"THIRTY_MINUTE",3600
 
 const SYM_TESTS = [
   {
-    sym:"BTC-USD", execGran:900, execExtra:3, regimeMs:THIRTY_MIN_MS, regimeFromExec:true,
+    sym:"BTC-USDC", execGran:900, execExtra:3, regimeMs:THIRTY_MIN_MS, regimeFromExec:true,
     trendFollowing:false, btcGate:false, chochGate:false, bosOnly:true,
     curBuy:[33,33,33], curSell:[10,15,25,50],
     buyVariants: [
@@ -33,7 +33,7 @@ const SYM_TESTS = [
     ],
   },
   {
-    sym:"ETH-USD", execGran:300, execExtra:6, regimeMs:THIRTY_MIN_MS, regimeFromExec:true,
+    sym:"ETH-USDC", execGran:300, execExtra:6, regimeMs:THIRTY_MIN_MS, regimeFromExec:true,
     trendFollowing:false, btcGate:false, chochGate:false, bosOnly:true,
     curBuy:[15,15,15,15], curSell:[5,10,20,40],
     buyVariants: [
@@ -50,7 +50,7 @@ const SYM_TESTS = [
     ],
   },
   {
-    sym:"SOL-USD", execGran:300, execExtra:6, regimeMs:THIRTY_MIN_MS, regimeFromExec:true,
+    sym:"SOL-USDC", execGran:300, execExtra:6, regimeMs:THIRTY_MIN_MS, regimeFromExec:true,
     trendFollowing:false, btcGate:false, chochGate:false, bosOnly:false,
     curBuy:[15,15,15,15], curSell:[5,10,20,40],
     buyVariants: [
@@ -67,7 +67,7 @@ const SYM_TESTS = [
     ],
   },
   {
-    sym:"LINK-USD", execGran:300, execExtra:6, regimeMs:THIRTY_MIN_MS, regimeFromExec:true,
+    sym:"LINK-USDC", execGran:300, execExtra:6, regimeMs:THIRTY_MIN_MS, regimeFromExec:true,
     trendFollowing:false, btcGate:false, chochGate:false, bosOnly:true,
     curBuy:[60,25,10,5], curSell:[33,33,33,33],
     buyVariants: [
@@ -84,7 +84,7 @@ const SYM_TESTS = [
     ],
   },
   {
-    sym:"PEPE-USD", execGran:300, execExtra:3, regimeMs:HOUR_MS, regimeFromExec:false, regimeGran:3600,
+    sym:"PEPE-USDC", execGran:300, execExtra:3, regimeMs:HOUR_MS, regimeFromExec:false, regimeGran:3600,
     trendFollowing:true, btcGate:true, chochGate:true, bosOnly:false,
     curBuy:[60,25,10,5], curSell:[5,10,20,40],
     buyVariants: [
@@ -101,7 +101,7 @@ const SYM_TESTS = [
     ],
   },
   {
-    sym:"AKT-USD", execGran:300, execExtra:6, regimeMs:FIFTEEN_MIN_MS, regimeFromExec:true,
+    sym:"AKT-USDC", execGran:300, execExtra:6, regimeMs:FIFTEEN_MIN_MS, regimeFromExec:true,
     trendFollowing:false, btcGate:false, chochGate:false, bosOnly:false,
     curBuy:[60,25,10,5], curSell:[50,25,15,10],
     buyVariants: [
@@ -314,7 +314,7 @@ async function main(){
   const maxDays=180+12;
 
   console.log(`─── Fetching BTC-USD 1h (PEPE BTC gate) ─────────────────────────────`);
-  const btcHour=await fetchAllBars("BTC-USD",3600,maxDays,"BTC-USD 1h");
+  const btcHour=await fetchAllBars("BTC-USDC",3600,maxDays,"BTC-USD 1h");
   const btcSArr=buildBtcStateArr(btcHour);
   await sleep(600);
 
