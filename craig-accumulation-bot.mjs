@@ -16,7 +16,7 @@
 //                  % of regime-start capital per BOS signal — UNLIMITED slots (slot 4+ repeats last)
 //   Sell ladder  : BTC [10,15,25,50]%  ETH/SOL [5,10,20,40]%  LINK [33,33,33,33]%  PEPE [5,10,20,40]%  AKT [50,25,15,10]%
 //                  % of regime-start crypto qty per BOS signal — UNLIMITED slots
-//   CHOCH        : continues scale (same per-slot %; no all-in)
+//   CHOCH        : continues scale (same per-slot %; no all-in) — BOS-only for BTC/ETH/LINK (no CHOCH trades)
 //
 // REPORTS  : 6-hour check-in + EOD at 23:55  (Pacific Time)  via Telegram
 // COMMANDS : /status  /report  /trades  /help  (reply in Telegram chat)
@@ -147,10 +147,12 @@ const SYMBOL_CONFIG = {
     regime:    { gran: "THIRTY_MINUTE",  secs: 1800, bars: 600, ms: THIRTY_MIN_MS, label: "30m" },
     buyLadder:  [33, 33, 33],        // flat-33 — fewer bigger entries beat flat-15 DCA across all periods
     sellLadder: [10, 15, 25, 50],    // back-mid — hold most for the full rally, better than back-steep at 90/180d
+    bosOnly:    true,                // BOS-only: no CHOCH trades (+3.5-4.2% at 90/180d vs BOS+CHOCH)
   },
   "ETH-USD": {
     exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
     regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 600, ms: THIRTY_MIN_MS, label: "30m" },
+    bosOnly: true,                   // BOS-only: +4.23% at 180d vs BOS+CHOCH
   },
   "SOL-USD": {
     exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
@@ -161,6 +163,7 @@ const SYMBOL_CONFIG = {
     regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 600, ms: THIRTY_MIN_MS,  label: "30m" },
     buyLadder:  [60, 25, 10,  5],    // front-60 — deploy fast; LINK moves hard, wins all periods vs flat-15
     sellLadder: [33, 33, 33, 33],    // flat-33 — LINK oscillates; uniform distribution beats backloaded
+    bosOnly:    true,                // BOS-only: +1.0% at 90d / +3.0% at 180d vs BOS+CHOCH
   },
   // PEPE: trend-following (not contrarian) — meme coins ride narrative supercycles
   //   golden cross → BUY  (ride the pump),  death cross → SELL (exit the dump)
@@ -994,7 +997,7 @@ async function processSymbol(symbol) {
       // CHOCH buy — continues scale; slots 5+ repeat the last ladder value
       // bullCHOCH = structure reverting to uptrend — valid buy for both trend and contrarian
       const chochBuyArmed = !REQUIRE_BOS_BEFORE_CHOCH || state.bosCount >= 1;
-      if (CHOCH_CONTINUE_SCALE && bullCHOCH && chochBuyArmed && btcGateOpen && state.cash >= MIN_ORDER_USD) {
+      if (CHOCH_CONTINUE_SCALE && !cfg.bosOnly && bullCHOCH && chochBuyArmed && btcGateOpen && state.cash >= MIN_ORDER_USD) {
         const buyUSD = Math.min((state.regimeStartCapital * buySlot(state.bosCount)) / 100, state.cash);
         if (buyUSD >= MIN_ORDER_USD) {
           try {
@@ -1053,7 +1056,7 @@ async function processSymbol(symbol) {
       // CHOCH sell — continues scale; slots 5+ repeat the last ladder value
       // bearCHOCH = structure reverting to downtrend — valid sell for both trend and contrarian
       const chochSellArmed = !REQUIRE_BOS_BEFORE_CHOCH || state.bosCount >= 1;
-      if (CHOCH_CONTINUE_SCALE && bearCHOCH && chochSellArmed && state.cryptoQty >= MIN_ORDER_QTY) {
+      if (CHOCH_CONTINUE_SCALE && !cfg.bosOnly && bearCHOCH && chochSellArmed && state.cryptoQty >= MIN_ORDER_QTY) {
         const sellQty = Math.min((state.regimeStartCryptoQty * sellSlot(state.bosCount)) / 100, state.cryptoQty);
         if (sellQty >= MIN_ORDER_QTY) {
           try {
