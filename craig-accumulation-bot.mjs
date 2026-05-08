@@ -1633,6 +1633,43 @@ async function cmdResumeSymbol(arg) {
   }
 }
 
+async function sendBackup() {
+  const ts = new Date().toISOString().replace("T", " ").slice(0, 16) + " UTC";
+  let summary = `💾 <b>State Backup</b> — ${ts}\n<code>Instance: ${BOT_INSTANCE_ID}</code>\n\n`;
+  let restoreBlock = `<b>Restore commands (paste if state wiped):</b>\n<code>`;
+
+  for (const sym of SYMBOLS) {
+    try {
+      const s     = loadState(sym);
+      const short = sym.replace("-USDC", "").toLowerCase();
+      const portVal = s.cash + s.cryptoQty * (s.lastPrice || 0);
+      const pxStr   = s.lastPrice ? ` @ ${fPrice(s.lastPrice)}` : "";
+
+      summary +=
+        `<b>${sym}</b>  ${s.regime.toUpperCase()}  ≈$${portVal.toFixed(2)}\n` +
+        `  cash: $${s.cash.toFixed(2)}  crypto: ${fQty(s.cryptoQty)}${pxStr}\n` +
+        `  regimeStartCap: $${s.regimeStartCapital.toFixed(2)}` +
+        (s.regimeStartCryptoQty > 0 ? `  regimeStartQty: ${fQty(s.regimeStartCryptoQty)}` : "") +
+        (( s.preExistingCryptoQty ?? 0) > 0 ? `  preExisting: ${fQty(s.preExistingCryptoQty)}` : "") +
+        `  bosCount: ${s.bosCount}  trades: ${s.trades.length}\n\n`;
+
+      restoreBlock += `/setcash ${short} ${s.cash.toFixed(2)}\n`;
+      restoreBlock += `/setcryptoqty ${short} ${fQty(s.cryptoQty)}\n`;
+      if (s.regimeStartCryptoQty > 0)
+        restoreBlock += `/setregimeqty ${short} ${fQty(s.regimeStartCryptoQty)}\n`;
+      if ((s.preExistingCryptoQty ?? 0) > 0)
+        restoreBlock += `/setpreexisting ${short} ${fQty(s.preExistingCryptoQty)}\n`;
+      restoreBlock += `\n`;
+    } catch (e) {
+      summary += `<b>${sym}</b>  ⚠️ read error: ${e.message}\n\n`;
+    }
+  }
+
+  restoreBlock += `</code>`;
+  await sendTelegram(summary + restoreBlock);
+  console.log("[Telegram] /backup sent");
+}
+
 async function sendHelpMessage() {
   await sendTelegram(
     `🤖 <b>Craig Accum Bot v2 — Commands</b>\n\n` +
@@ -1648,6 +1685,7 @@ async function sendHelpMessage() {
     `/btc /eth /sol /link /pepe /akt — Symbol snapshot\n\n` +
     `<b>Control</b>\n` +
     `/scan          — Trigger immediate scan now\n` +
+    `/backup        — Snapshot all state to Telegram (cash, crypto, regimeStartCap per symbol + restore commands)\n` +
     `/pause &lt;sym&gt;        — Pause trading for a symbol (btc, eth, sol…)\n` +
     `/resume &lt;sym&gt;       — Resume trading for a symbol\n` +
     `/pause all           — Pause ALL symbols\n` +
@@ -1725,6 +1763,7 @@ async function startTelegramPoller() {
         else if (cmd === "/report"  || cmd === "/r")  { await sendPortfolioReport(); }
         else if (cmd === "/trades"  || cmd === "/t")  { await sendTodaysTrades(); }
         else if (cmd === "/hist"    || cmd === "/history") { await sendTradeHistory(); }
+        else if (cmd === "/backup"  || cmd === "/bk") { await sendBackup(); }
         else if (cmd === "/scan"    || cmd === "/sc") {
           if (scanInProgress) {
             await sendTelegram("⏳ Scan already in progress — please wait.");
