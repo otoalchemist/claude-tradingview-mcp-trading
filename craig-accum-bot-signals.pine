@@ -18,6 +18,10 @@ indicator("Craig Accum Bot - Signals", overlay=true, max_labels_count=500, max_l
 //     SELL regime: bearCHOCH opens gate → BOS sells fire | bullCHOCH closes gate → BOS sells blocked
 //     CHOCH signals always execute (they are the gate-opener); only BOS is gated.
 //
+//   BOS-ONLY COINS — BTC / ETH / LINK  (bosOnly=true in SYMBOL_CONFIG)
+//     CHOCH labels still appear on chart for structure context, but the bot does NOT trade them.
+//     Only BOS signals generate orders for these three symbols.
+//
 //   Timeframe guide (set chart TF + Regime TF input to match your symbol):
 //     BTC-USD      exec: 15m  regime: 30
 //     ETH/SOL/LINK exec: 5m   regime: 30
@@ -49,8 +53,8 @@ i_showBG         = input.bool(true,        "Show Regime Background",     group="
 i_showSwings     = input.bool(true,        "Show Swing H/L Dots",        group="Display")
 i_showBOSlbl     = input.bool(true,        "Show BOS/CHOCH Labels",      group="Display")
 i_showGated      = input.bool(true,        "Show Gated-Out BOS (orange)", group="Display")
-i_sym            = input.string("BTC/ETH/SOL", "Symbol (for ladder display)",
-                     options=["BTC/ETH/SOL", "LINK", "PEPE", "AKT"],    group="Display")
+i_sym            = input.string("BTC", "Symbol (for ladder display)",
+                     options=["BTC", "ETH/SOL", "LINK", "PEPE", "AKT"], group="Display")
 
 // --- REGIME TF : EMA 50 / 200 ------------------------------------------------
 regEmaF = request.security(syminfo.tickerid, i_regimeTF, ta.ema(close, i_emaFast)[1], lookahead=barmerge.lookahead_on)
@@ -203,12 +207,18 @@ if i_showBOSlbl
 
     if actionableBuyBOS and gateOpen
         label.new(bar_index, lastSL, "BOS", color=color.new(color.teal, 20), textcolor=color.white, style=label.style_label_up, size=size.small)
+    // BOS-only coins (BTC/ETH/LINK): CHOCH shown for structure context but dimmed — bot does NOT trade it
+    bosOnlyCoin = i_sym == "BTC" or i_sym == "ETH/SOL" or i_sym == "LINK"
     if actionableBuyCHOCH
-        label.new(bar_index, lastSH, "CHOCH", color=color.new(color.green, 10), textcolor=color.white, style=label.style_label_up, size=size.small)
+        chochColor = bosOnlyCoin ? color.new(color.green, 60) : color.new(color.green, 10)
+        chochText  = bosOnlyCoin ? "CHOCH (no trade)" : "CHOCH"
+        label.new(bar_index, lastSH, chochText, color=chochColor, textcolor=color.white, style=label.style_label_up, size=size.small)
     if actionableSellBOS and gateOpen
         label.new(bar_index, lastSH, "BOS", color=color.new(color.maroon, 20), textcolor=color.white, style=label.style_label_down, size=size.small)
     if actionableSellCHOCH
-        label.new(bar_index, lastSL, "CHOCH", color=color.new(color.red, 10), textcolor=color.white, style=label.style_label_down, size=size.small)
+        sellChochColor = bosOnlyCoin ? color.new(color.red, 60) : color.new(color.red, 10)
+        sellChochText  = bosOnlyCoin ? "CHOCH (no trade)" : "CHOCH"
+        label.new(bar_index, lastSL, sellChochText, color=sellChochColor, textcolor=color.white, style=label.style_label_down, size=size.small)
 
     // Gated-out BOS — show in orange when gate is blocking the signal
     if i_showGated
@@ -239,23 +249,32 @@ if sellSignal
 
 // --- INFO TABLE --------------------------------------------------------------
 f_buyLadder(s)  =>
-    s == "PEPE" or s == "AKT" ? "60·25·10·5" : "15·15·15·15"
+    s == "BTC"              ? "33·33·33"     :
+     s == "LINK" or s == "PEPE" or s == "AKT" ? "60·25·10·5" :
+     "15·15·15·15"   // ETH/SOL
 
 f_sellLadder(s) =>
-    s == "AKT" ? "50·25·15·10" : s == "LINK" ? "33·33·33·33" : "5·10·20·40"
+    s == "BTC"  ? "10·15·25·50" :
+     s == "AKT"  ? "50·25·15·10" :
+     s == "LINK" ? "33·33·33·33" :
+     "5·10·20·40"   // ETH/SOL + PEPE
 
 f_nextBuyPct(s, slot) =>
-    if s == "PEPE" or s == "AKT"
+    if s == "BTC"
+        33
+    else if s == "LINK" or s == "PEPE" or s == "AKT"
         slot == 0 ? 60 : slot == 1 ? 25 : slot == 2 ? 10 : 5
-    else
+    else  // ETH/SOL
         15
 
 f_nextSellPct(s, slot) =>
-    if s == "AKT"
+    if s == "BTC"
+        slot == 0 ? 10 : slot == 1 ? 15 : slot == 2 ? 25 : 50
+    else if s == "AKT"
         slot == 0 ? 50 : slot == 1 ? 25 : slot == 2 ? 15 : 10
     else if s == "LINK"
         33
-    else
+    else  // ETH/SOL + PEPE
         slot == 0 ? 5 : slot == 1 ? 10 : slot == 2 ? 20 : 40
 
 // Table: 11 rows — Regime, Exec TF, Regime TF, EMA50, EMA200, Signals, Symbol, Buy%, Sell%, Next, Gate
