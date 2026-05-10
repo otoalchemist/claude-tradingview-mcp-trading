@@ -1668,6 +1668,7 @@ async function sendBackup() {
         `  bosCount: ${s.bosCount}  trades: ${s.trades.length}\n\n`;
 
       restoreBlock += `/setcash ${short} ${s.cash.toFixed(2)}\n`;
+      restoreBlock += `/setregimecapital ${short} ${s.regimeStartCapital.toFixed(2)}\n`;
       restoreBlock += `/setcryptoqty ${short} ${fQty(s.cryptoQty)}\n`;
       if (s.regimeStartCryptoQty > 0)
         restoreBlock += `/setregimeqty ${short} ${fQty(s.regimeStartCryptoQty)}\n`;
@@ -1704,11 +1705,12 @@ async function sendHelpMessage() {
     `/resume &lt;sym&gt;       — Resume trading for a symbol\n` +
     `/pause all           — Pause ALL symbols\n` +
     `/resume all          — Resume ALL symbols\n` +
-    `/setcash &lt;sym&gt; &lt;$&gt;      — Manually correct cash balance\n` +
-    `/setregimeqty &lt;sym&gt; &lt;qty&gt; — Fix sell baseline qty (e.g. /setregimeqty link 10.93)\n` +
-    `/setcryptoqty &lt;sym&gt; &lt;qty&gt; — Force-set cryptoQty directly (e.g. /setcryptoqty eth 0.031)\n` +
-    `/setpreexisting &lt;sym&gt; &lt;qty&gt; — Fix pre-existing balance offset (e.g. /setpreexisting link 0)\n` +
-    `/reconcile &lt;sym&gt;       — Full state recovery after bad re-init (fixes cryptoQty + regimeStartCapital)\n` +
+    `/setcash &lt;sym&gt; &lt;$&gt;           — Add/correct cash balance\n` +
+    `/setregimecapital &lt;sym&gt; &lt;$&gt;  — Scale up buy-ladder sizing (run after /setcash when adding capital)\n` +
+    `/setregimeqty &lt;sym&gt; &lt;qty&gt;    — Fix sell baseline qty (e.g. /setregimeqty link 10.93)\n` +
+    `/setcryptoqty &lt;sym&gt; &lt;qty&gt;    — Force-set cryptoQty directly (e.g. /setcryptoqty eth 0.031)\n` +
+    `/setpreexisting &lt;sym&gt; &lt;qty&gt;  — Fix pre-existing balance offset (e.g. /setpreexisting link 0)\n` +
+    `/reconcile &lt;sym&gt;             — Full state recovery after bad re-init (fixes cryptoQty + regimeStartCapital)\n` +
     `/help                — This message\n\n` +
     `<b>Strategy</b>\n` +
     `BTC: 30m regime / 15m exec\n` +
@@ -1800,6 +1802,37 @@ async function startTelegramPoller() {
             st.cash = amount;
             saveState(sym, st);
             await sendTelegram(`✅ <b>${sym}</b> cash updated: $${old} → $${amount.toFixed(2)}`);
+          }
+        } else if (cmd === "/setregimecapital") {
+          // /setregimecapital <symbol> <amount>  e.g. /setregimecapital eth 200
+          // Add capital or correct the buy-sizing baseline.
+          // regimeStartCapital controls BUY ladder sizing: buyUSD = regimeStartCapital * slot%
+          // Use /setcash to add the matching cash FIRST, then this to scale up the ladder.
+          // In SELL regime this only affects P&L reporting (baseline), not sell sizing.
+          const parts  = rawText.trim().split(/\s+/);
+          const symRaw = (parts[1] || "").toUpperCase();
+          const sym    = symRaw.includes("-") ? symRaw : `${symRaw}-USDC`;
+          const amount = parseFloat(parts[2]);
+          if (!SYMBOL_CONFIG[sym] || isNaN(amount) || amount <= 0) {
+            await sendTelegram(
+              `❌ Usage: /setregimecapital &lt;symbol&gt; &lt;amount&gt;\n` +
+              `Example: <code>/setregimecapital ETH 200</code>\n\n` +
+              `Sets regimeStartCapital — the baseline for buy ladder sizing.\n` +
+              `Also run <code>/setcash ${sym.replace("-USDC","").toLowerCase()} &lt;amount&gt;</code> to add the matching cash.`
+            );
+          } else {
+            const st  = loadState(sym);
+            const old = st.regimeStartCapital;
+            st.regimeStartCapital = amount;
+            saveState(sym, st);
+            const cfg = SYMBOL_CONFIG[sym];
+            const ladder = (cfg.buyLadder ?? BOS_SCALE_PCT_BUY);
+            const slotSizes = ladder.map((pct, i) => `#${i+1}: $${(amount * pct / 100).toFixed(2)}`).join('  ');
+            await sendTelegram(
+              `✅ <b>${sym}</b> regimeStartCapital: $${old.toFixed(2)} → $${amount.toFixed(2)}\n\n` +
+              `Buy slots now sized:\n<code>${slotSizes}</code>\n\n` +
+              `Cash: $${st.cash.toFixed(2)}  (run <code>/setcash ${sym.replace("-USDC","").toLowerCase()} ${amount.toFixed(2)}</code> if you haven't added the cash yet)`
+            );
           }
         } else if (cmd === "/setregimeqty") {
           // /setregimeqty <symbol> <qty>  e.g. /setregimeqty link 10.93
