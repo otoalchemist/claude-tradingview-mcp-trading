@@ -606,12 +606,16 @@ function loadState(symbol) {
       console.log(`[${symbol}] Exec TF changed (${state.execGran ?? "unknown"} → ${cfg.exec.gran}) — state reset (backup: ${backupPath})`);
       return makeFreshState(symbol);
     }
-    if (state.regimeGran !== undefined && state.regimeGran !== cfg.regime.gran) {
+    if (!("regimeGran" in state) || state.regimeGran !== cfg.regime.gran) {
       // Regime timeframe changed (e.g. ETH 30m → 15m) — old regime state is now misaligned.
-      // Reset so the bot re-initializes with the correct cross state on the new TF.
+      // Also fires when regimeGran was never saved (states from before this field was added),
+      // since we can't verify what TF was active — safest to re-detect regime cleanly.
+      const reason = !("regimeGran" in state)
+        ? `regimeGran not tracked (first upgrade) → re-detecting regime`
+        : `Regime TF changed (${state.regimeGran} → ${cfg.regime.gran})`;
       const backupPath = stateFile(symbol) + `.backup-${Date.now()}`;
       try { writeFileSync(backupPath, readFileSync(stateFile(symbol))); } catch {}
-      console.log(`[${symbol}] Regime TF changed (${state.regimeGran} → ${cfg.regime.gran}) — state reset (backup: ${backupPath})`);
+      console.log(`[${symbol}] ${reason} — state reset (backup: ${backupPath})`);
       return makeFreshState(symbol);
     }
     // Back-fill new fields for states saved before they were added
@@ -1434,7 +1438,7 @@ async function sendTodaysTrades() {
   for (const symbol of SYMBOLS) {
     try {
       const s      = loadState(symbol);
-      const today  = s.trades.filter(t => t.ts?.startsWith(todayDate));
+      const today  = s.trades.filter(t => t.ts && ptDate(new Date(t.ts)) === todayDate);
       totalCount  += today.length;
       if (!today.length) { lines.push(`<b>${symbol}</b> — no trades today`); continue; }
       const rows = today.map(t => {
