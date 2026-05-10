@@ -16,7 +16,7 @@
 //                  % of regime-start capital per BOS signal — UNLIMITED slots (slot 4+ repeats last)
 //   Sell ladder  : BTC [10,15,25,50]%  ETH/SOL [5,10,20,40]%  LINK [33,33,33,33]%  PEPE [5,10,20,40]%  AKT [50,25,15,10]%
 //                  % of regime-start crypto qty per BOS signal — UNLIMITED slots
-//   CHOCH        : continues scale (same per-slot %; no all-in) — BOS-only for BTC/ETH/LINK (no CHOCH trades)
+//   CHOCH        : continues scale (same per-slot %; no all-in) — BOS-only for BTC/LINK (no CHOCH trades); ETH/SOL/AKT use BOS+CHOCH
 //
 // REPORTS  : EOD at 23:55 UTC — performance + daily moves + news headlines
 // COMMANDS : /status  /report  /trades  /help  (reply in Telegram chat)
@@ -152,7 +152,7 @@ const SYMBOL_CONFIG = {
   "ETH-USDC": {
     exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
     regime:{ gran: "FIFTEEN_MINUTE", secs:  900, bars: 800, ms: FIFTEEN_MIN_MS, label: "15m" },
-    // bosOnly removed — BOS+CHOCH: +5.77pt avg alpha vs bosOnly across 30/60/90/180d
+    bosOnly: false,                  // BOS+CHOCH: +5.77pt avg alpha vs bosOnly across all periods
     // regime 15m → +22.54% avg alpha vs +10.24% at 30m (backtest-eth-combined.mjs, config D)
   },
   "SOL-USDC": {
