@@ -571,6 +571,7 @@ function makeFreshState(symbol) {
   return {
     symbol,
     execGran:             cfg.exec.gran,   // detect timeframe migrations on restart
+    regimeGran:           cfg.regime.gran, // detect regime-TF migrations on restart
     initialized:          false,
     tradingPaused:        false,           // per-symbol pause via /pause command
     regime:               "neutral",
@@ -603,6 +604,14 @@ function loadState(symbol) {
       const backupPath = stateFile(symbol) + `.backup-${Date.now()}`;
       try { writeFileSync(backupPath, readFileSync(stateFile(symbol))); } catch {}
       console.log(`[${symbol}] Exec TF changed (${state.execGran ?? "unknown"} → ${cfg.exec.gran}) — state reset (backup: ${backupPath})`);
+      return makeFreshState(symbol);
+    }
+    if (state.regimeGran !== undefined && state.regimeGran !== cfg.regime.gran) {
+      // Regime timeframe changed (e.g. ETH 30m → 15m) — old regime state is now misaligned.
+      // Reset so the bot re-initializes with the correct cross state on the new TF.
+      const backupPath = stateFile(symbol) + `.backup-${Date.now()}`;
+      try { writeFileSync(backupPath, readFileSync(stateFile(symbol))); } catch {}
+      console.log(`[${symbol}] Regime TF changed (${state.regimeGran} → ${cfg.regime.gran}) — state reset (backup: ${backupPath})`);
       return makeFreshState(symbol);
     }
     // Back-fill new fields for states saved before they were added

@@ -1,6 +1,7 @@
 {
   "symbol": "ETH-USDC",
   "execGran": "FIVE_MINUTE",
+  "regimeGran": "FIFTEEN_MINUTE",
   "initialized": false,
   "tradingPaused": false,
   "regime": "neutral",
