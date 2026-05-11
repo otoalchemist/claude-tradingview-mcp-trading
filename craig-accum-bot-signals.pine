@@ -25,7 +25,7 @@ indicator("Craig Accum Bot - Signals", overlay=true, max_labels_count=500, max_l
 //
 //   Timeframe guide (set chart TF + Regime TF input to match your symbol):
 //     BTC-USD      exec: 15m  regime: 30  EMA 50/200  BOS-only
-//     ETH-USD      exec: 5m   regime: 30  EMA 50/200  BOS-only
+//     ETH-USD      exec: 5m   regime: 30  EMA 20/200  BOS-only
 //     SOL-USD      exec: 5m   regime: 30  EMA 50/200  BOS+CHOCH
 //     LINK-USD     exec: 5m   regime: 30  EMA 20/200  BOS-only
 //     PEPE-USD     exec: 5m   regime: 60  EMA 50/200  BOS+CHOCH  ← Trend-Following + CHOCH Gate
@@ -37,7 +37,7 @@ indicator("Craig Accum Bot - Signals", overlay=true, max_labels_count=500, max_l
 //     SOL          buy: 60·25·10·5   sell:  5·10·20·40  (front-60 / back-steep)
 //     LINK         buy: 60·25·10·5   sell: 33·33·33·33  (front-60 / flat-33)
 //     PEPE         buy: 60·25·10·5   sell:  5·10·20·40  (front-60 / back-steep)  [TREND + CHOCH GATE]
-//     AKT          buy: 60·25·10·5   sell: 50·25·15·10  (front-60 / front-50)
+//     AKT          buy: 80·10·5·5    sell: 33·33·33·33  (aggressive-front-80 / flat-33)
 //
 //   Slot indexing: Math.min(bosCount, ladderLength-1)
 //   → slot 0 = signal #1, slot 1 = signal #2 … slot 3+ repeats last value
@@ -253,20 +253,22 @@ if sellSignal
 
 // --- INFO TABLE --------------------------------------------------------------
 f_buyLadder(s)  =>
-    s == "BTC"              ? "33·33·33"     :
-     s == "SOL" or s == "LINK" or s == "PEPE" or s == "AKT" ? "60·25·10·5" :
+    s == "BTC"                                ? "33·33·33"     :
+     s == "AKT"                                ? "80·10·5·5"    :
+     s == "SOL" or s == "LINK" or s == "PEPE"  ? "60·25·10·5"  :
      "15·15·15·15"   // ETH
 
 f_sellLadder(s) =>
-    s == "BTC"  ? "10·15·25·50" :
-     s == "AKT"  ? "50·25·15·10" :
-     s == "LINK" ? "33·33·33·33" :
+    s == "BTC"              ? "10·15·25·50" :
+     s == "AKT" or s == "LINK" ? "33·33·33·33" :
      "5·10·20·40"   // ETH/SOL/PEPE
 
 f_nextBuyPct(s, slot) =>
     if s == "BTC"
         33
-    else if s == "SOL" or s == "LINK" or s == "PEPE" or s == "AKT"
+    else if s == "AKT"
+        slot == 0 ? 80 : slot == 1 ? 10 : slot == 2 ? 5 : 5
+    else if s == "SOL" or s == "LINK" or s == "PEPE"
         slot == 0 ? 60 : slot == 1 ? 25 : slot == 2 ? 10 : 5
     else  // ETH
         15
@@ -274,9 +276,7 @@ f_nextBuyPct(s, slot) =>
 f_nextSellPct(s, slot) =>
     if s == "BTC"
         slot == 0 ? 10 : slot == 1 ? 15 : slot == 2 ? 25 : 50
-    else if s == "AKT"
-        slot == 0 ? 50 : slot == 1 ? 25 : slot == 2 ? 15 : 10
-    else if s == "LINK"
+    else if s == "AKT" or s == "LINK"
         33
     else  // ETH/SOL/PEPE
         slot == 0 ? 5 : slot == 1 ? 10 : slot == 2 ? 20 : 40

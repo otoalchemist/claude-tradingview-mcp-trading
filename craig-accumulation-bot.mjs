@@ -4,7 +4,7 @@
 //
 // STRATEGY (per-symbol timeframes):
 //   BTC-USDC  : 30m EMA50/200  regime  →  15m BOS-only execution
-//   ETH-USDC  : 30m EMA50/200  regime  →   5m BOS-only execution
+//   ETH-USDC  : 30m EMA20/200  regime  →   5m BOS-only execution
 //   SOL-USDC  : 30m EMA50/200  regime  →   5m BOS+CHOCH execution
 //   LINK-USDC : 30m EMA20/200  regime  →   5m BOS-only execution
 //   PEPE-USDC :  1h EMA50/200  regime  →   5m BOS+CHOCH execution  [TREND-FOLLOWING + BTC gate]
@@ -150,8 +150,9 @@ const SYMBOL_CONFIG = {
     bosOnly:    true,                // BOS-only: no CHOCH trades (+3.5-4.2% at 90/180d vs BOS+CHOCH)
   },
   "ETH-USDC": {
-    exec:  { gran: "FIVE_MINUTE",   secs:  300, bars: 300, label: "5m"  },
-    regime:{ gran: "THIRTY_MINUTE", secs: 1800, bars: 600, ms: THIRTY_MIN_MS, label: "30m" },
+    exec:    { gran: "FIVE_MINUTE",   secs:  300, bars: 300, label: "5m"  },
+    regime:  { gran: "THIRTY_MINUTE", secs: 1800, bars: 600, ms: THIRTY_MIN_MS, label: "30m" },
+    emaFast: 20,                     // EMA20/200: +5.09pt avg α vs 50/200 (backtest-all-v2.mjs r2)
     bosOnly: true,                   // BOS-only: +7.85pt avg α vs BOS+CHOCH (backtest-all-v2.mjs)
     // regime 30m → +23.71% avg α vs +12.97% at 15m (+10.74pt, backtest-all-v2.mjs)
   },
@@ -182,15 +183,16 @@ const SYMBOL_CONFIG = {
     btcGate:        true,              // only buy when BTC EMA50 > EMA200 (crypto bull market)
     useChochGate:   true,             // gate-closed: pause BOS until aligned CHOCH fires
   },
-  // AKT: EMA21/55 → +41.83pt avg α vs EMA50/200 (backtest-all-v2.mjs) — transforms -25.64% → +16.19%
-  //      buy=front-60, sell=front-50 (both optimal in prior sweep)
+  // AKT: EMA21/55 → +41.83pt avg α vs EMA50/200 (backtest-all-v2.mjs r1)
+  //      buy=aggressive-front-80 (+4.67pt, backtest-all-v2.mjs r2) — deploy immediately; AKT moves fast
+  //      sell=flat-33 (+5.44pt, backtest-all-v2.mjs r2) — hold for full 180d run vs front-50
   "AKT-USDC": {
     exec:    { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
     regime:  { gran: "FIFTEEN_MINUTE", secs:  900, bars: 600, ms: FIFTEEN_MIN_MS, label: "15m" },
-    emaFast: 21,                    // EMA21/55: +41.83pt avg α vs 50/200 (backtest-all-v2.mjs)
+    emaFast: 21,                    // EMA21/55: +41.83pt avg α vs 50/200 (backtest-all-v2.mjs r1)
     emaSlow: 55,
-    buyLadder:  [60, 25, 10,  5],  // front-60 — deploy fast; AKT moves hard when it moves
-    sellLadder: [50, 25, 15, 10],  // front-50 — take profits early
+    buyLadder:  [80, 10,  5,  5],  // aggressive-front-80: +4.67pt avg α vs front-60 (backtest-all-v2.mjs r2)
+    sellLadder: [33, 33, 33, 33],  // flat-33: +5.44pt avg α vs front-50 (backtest-all-v2.mjs r2)
   },
 };
 
