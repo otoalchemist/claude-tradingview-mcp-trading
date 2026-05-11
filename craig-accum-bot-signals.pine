@@ -5,8 +5,8 @@ indicator("Craig Accum Bot - Signals", overlay=true, max_labels_count=500, max_l
 // Mirrors craig-accumulation-bot.mjs exactly:
 //
 //   CONTRARIAN (default) — BTC / ETH / SOL / LINK / AKT
-//     Death cross  (EMA50 < EMA200) = BUY  regime: bearBOS = buy dip  | bullCHOCH = buy reversal
-//     Golden cross (EMA50 > EMA200) = SELL regime: bullBOS = sell rally | bearCHOCH = sell reversal
+//     Death cross  (fast EMA < slow EMA) = BUY  regime: bearBOS = buy dip  | bullCHOCH = buy reversal
+//     Golden cross (fast EMA > slow EMA) = SELL regime: bullBOS = sell rally | bearCHOCH = sell reversal
 //
 //   TREND-FOLLOWING — PEPE only  (enable "Trend-Following Mode" input)
 //     Golden cross (EMA50 > EMA200) = BUY  regime: bullBOS = buy breakout | bullCHOCH = buy reversal
@@ -18,17 +18,18 @@ indicator("Craig Accum Bot - Signals", overlay=true, max_labels_count=500, max_l
 //     SELL regime: bearCHOCH opens gate → BOS sells fire | bullCHOCH closes gate → BOS sells blocked
 //     CHOCH signals always execute (they are the gate-opener); only BOS is gated.
 //
-//   BOS-ONLY COINS — BTC / LINK  (bosOnly=true in SYMBOL_CONFIG)
+//   BOS-ONLY COINS — BTC / ETH / LINK  (bosOnly=true in SYMBOL_CONFIG)
 //     CHOCH labels still appear on chart for structure context, but the bot does NOT trade them.
-//     Only BOS signals generate orders for these two symbols.
-//     ETH / SOL / AKT use BOS+CHOCH (bosOnly=false).
+//     Only BOS signals generate orders for these three symbols.
+//     SOL / AKT / PEPE use BOS+CHOCH (bosOnly=false).
 //
 //   Timeframe guide (set chart TF + Regime TF input to match your symbol):
-//     BTC-USD      exec: 15m  regime: 30
-//     ETH-USD      exec: 5m   regime: 15  ← BOS+CHOCH (bosOnly=false)
-//     SOL/LINK     exec: 5m   regime: 30
-//     PEPE-USD     exec: 5m   regime: 60  ← Trend-Following + CHOCH Gate
-//     AKT-USD      exec: 5m   regime: 15
+//     BTC-USD      exec: 15m  regime: 30  EMA 50/200  BOS-only
+//     ETH-USD      exec: 5m   regime: 30  EMA 50/200  BOS-only
+//     SOL-USD      exec: 5m   regime: 30  EMA 50/200  BOS+CHOCH
+//     LINK-USD     exec: 5m   regime: 30  EMA 20/200  BOS-only
+//     PEPE-USD     exec: 5m   regime: 60  EMA 50/200  BOS+CHOCH  ← Trend-Following + CHOCH Gate
+//     AKT-USD      exec: 5m   regime: 15  EMA 21/55   BOS+CHOCH
 //
 //   Ladder reference (matches SYMBOL_CONFIG in craig-accumulation-bot.mjs):
 //     BTC          buy: 33·33·33      sell: 10·15·25·50  (flat-33 / back-mid)
@@ -43,7 +44,7 @@ indicator("Craig Accum Bot - Signals", overlay=true, max_labels_count=500, max_l
 // =============================================================================
 
 // --- INPUTS ------------------------------------------------------------------
-i_regimeTF       = input.timeframe("30",   "Regime TF  (BTC=30 | ETH=15 | SOL/LINK=30 | PEPE=60 | AKT=15)")
+i_regimeTF       = input.timeframe("30",   "Regime TF  (BTC/ETH/SOL/LINK=30 | AKT=15 | PEPE=60)")
 i_emaFast        = input.int(50,           "EMA Fast",            minval=1)
 i_emaSlow        = input.int(200,          "EMA Slow",            minval=1)
 i_swingLB        = input.int(5,            "Swing Lookback",      minval=1)
@@ -210,8 +211,8 @@ if i_showBOSlbl
 
     if actionableBuyBOS and gateOpen
         label.new(bar_index, lastSL, "BOS", color=color.new(color.teal, 20), textcolor=color.white, style=label.style_label_up, size=size.small)
-    // BOS-only coins (BTC/LINK): CHOCH shown for structure context but dimmed — bot does NOT trade it
-    bosOnlyCoin = i_sym == "BTC" or i_sym == "LINK"
+    // BOS-only coins (BTC/ETH/LINK): CHOCH shown for structure context but dimmed — bot does NOT trade it
+    bosOnlyCoin = i_sym == "BTC" or i_sym == "ETH" or i_sym == "LINK"
     if actionableBuyCHOCH
         chochColor = bosOnlyCoin ? color.new(color.green, 60) : color.new(color.green, 10)
         chochText  = bosOnlyCoin ? "CHOCH (no trade)" : "CHOCH"

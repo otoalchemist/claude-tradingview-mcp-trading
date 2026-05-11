@@ -1,6 +1,7 @@
 {
   "symbol": "LINK-USDC",
   "execGran": "FIVE_MINUTE",
+  "regimeGran": "THIRTY_MINUTE",
   "initialized": false,
   "tradingPaused": false,
   "regime": "neutral",

@@ -3,12 +3,12 @@
 // craig-accumulation-bot.mjs  — Live Trading  (v2)
 //
 // STRATEGY (per-symbol timeframes):
-//   BTC-USDC  : 30m EMA50/200 regime  →  15m BOS/CHOCH execution
-//   ETH-USDC  : 15m EMA50/200 regime  →   5m BOS/CHOCH execution
-//   SOL-USDC  : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
-//   LINK-USDC : 30m EMA50/200 regime  →   5m BOS/CHOCH execution
-//   PEPE-USDC :  1h EMA50/200 regime  →   5m BOS/CHOCH execution  [TREND-FOLLOWING + BTC gate]
-//   AKT-USDC  : 15m EMA50/200 regime  →   5m BOS/CHOCH execution
+//   BTC-USDC  : 30m EMA50/200  regime  →  15m BOS-only execution
+//   ETH-USDC  : 30m EMA50/200  regime  →   5m BOS-only execution
+//   SOL-USDC  : 30m EMA50/200  regime  →   5m BOS+CHOCH execution
+//   LINK-USDC : 30m EMA20/200  regime  →   5m BOS-only execution
+//   PEPE-USDC :  1h EMA50/200  regime  →   5m BOS+CHOCH execution  [TREND-FOLLOWING + BTC gate]
+//   AKT-USDC  : 15m EMA21/55   regime  →   5m BOS+CHOCH execution
 //
 //   Death cross  → BUY  regime: scale-in  on each bearish BOS / bullish CHOCH
 //   Golden cross → SELL regime: scale-out on each bullish BOS / bearish CHOCH
@@ -16,7 +16,7 @@
 //                  % of regime-start capital per BOS signal — UNLIMITED slots (slot 4+ repeats last)
 //   Sell ladder  : BTC [10,15,25,50]%  ETH/SOL [5,10,20,40]%  LINK [33,33,33,33]%  PEPE [5,10,20,40]%  AKT [50,25,15,10]%
 //                  % of regime-start crypto qty per BOS signal — UNLIMITED slots
-//   CHOCH        : continues scale (same per-slot %; no all-in) — BOS-only for BTC/LINK (no CHOCH trades); ETH/SOL/AKT use BOS+CHOCH
+//   CHOCH        : BOS-only for BTC/ETH/LINK (no CHOCH trades); SOL/AKT/PEPE use BOS+CHOCH
 //
 // REPORTS  : EOD at 23:55 UTC — performance + daily moves + news headlines
 // COMMANDS : /status  /report  /trades  /help  (reply in Telegram chat)
@@ -150,10 +150,10 @@ const SYMBOL_CONFIG = {
     bosOnly:    true,                // BOS-only: no CHOCH trades (+3.5-4.2% at 90/180d vs BOS+CHOCH)
   },
   "ETH-USDC": {
-    exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
-    regime:{ gran: "FIFTEEN_MINUTE", secs:  900, bars: 800, ms: FIFTEEN_MIN_MS, label: "15m" },
-    bosOnly: false,                  // BOS+CHOCH: +5.77pt avg alpha vs bosOnly across all periods
-    // regime 15m → +22.54% avg alpha vs +10.24% at 30m (backtest-eth-combined.mjs, config D)
+    exec:  { gran: "FIVE_MINUTE",   secs:  300, bars: 300, label: "5m"  },
+    regime:{ gran: "THIRTY_MINUTE", secs: 1800, bars: 600, ms: THIRTY_MIN_MS, label: "30m" },
+    bosOnly: true,                   // BOS-only: +7.85pt avg α vs BOS+CHOCH (backtest-all-v2.mjs)
+    // regime 30m → +23.71% avg α vs +12.97% at 15m (+10.74pt, backtest-all-v2.mjs)
   },
   "SOL-USDC": {
     exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
@@ -161,8 +161,9 @@ const SYMBOL_CONFIG = {
     buyLadder:  [60, 25, 10,  5],    // front-60 — deploy fast; +4.3% at 60d / +5.4% at 90d vs flat-15
   },
   "LINK-USDC": {
-    exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
-    regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 600, ms: THIRTY_MIN_MS,  label: "30m" },
+    exec:    { gran: "FIVE_MINUTE",   secs:  300, bars: 300, label: "5m"  },
+    regime:  { gran: "THIRTY_MINUTE", secs: 1800, bars: 600, ms: THIRTY_MIN_MS, label: "30m" },
+    emaFast: 20,                     // EMA20/200: +7.00pt avg α vs 50/200 (backtest-all-v2.mjs)
     buyLadder:  [60, 25, 10,  5],    // front-60 — deploy fast; LINK moves hard, wins all periods vs flat-15
     sellLadder: [33, 33, 33, 33],    // flat-33 — LINK oscillates; uniform distribution beats backloaded
     bosOnly:    true,                // BOS-only: +1.0% at 90d / +3.0% at 180d vs BOS+CHOCH
@@ -181,13 +182,15 @@ const SYMBOL_CONFIG = {
     btcGate:        true,              // only buy when BTC EMA50 > EMA200 (crypto bull market)
     useChochGate:   true,             // gate-closed: pause BOS until aligned CHOCH fires
   },
-  // AKT: buy=front-60 (#1 both periods, +23.79% gain vs flat-33 in 90d)
-  //      sell=front-50 (#1 in 90d) / front-40 (#1 in 180d) → using front-50 as it wins 90d by larger margin
+  // AKT: EMA21/55 → +41.83pt avg α vs EMA50/200 (backtest-all-v2.mjs) — transforms -25.64% → +16.19%
+  //      buy=front-60, sell=front-50 (both optimal in prior sweep)
   "AKT-USDC": {
-    exec:   { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
-    regime: { gran: "FIFTEEN_MINUTE", secs:  900, bars: 600, ms: FIFTEEN_MIN_MS, label: "15m" },
-    buyLadder:  [60, 25, 10,  5],  // front-60 — deploy fast; AKT moves hard when it moves (+23% vs flat-33)
-    sellLadder: [50, 25, 15, 10],  // front-50 — take profits early; front-loaded beats back-steep by >20%
+    exec:    { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
+    regime:  { gran: "FIFTEEN_MINUTE", secs:  900, bars: 600, ms: FIFTEEN_MIN_MS, label: "15m" },
+    emaFast: 21,                    // EMA21/55: +41.83pt avg α vs 50/200 (backtest-all-v2.mjs)
+    emaSlow: 55,
+    buyLadder:  [60, 25, 10,  5],  // front-60 — deploy fast; AKT moves hard when it moves
+    sellLadder: [50, 25, 15, 10],  // front-50 — take profits early
   },
 };
 
@@ -548,10 +551,11 @@ function calcEMA(closes, period) {
 
 // ── Regime map builder (generic — works for any candle period) ────────────────
 // Keys are the CLOSE time of each regime candle = candle.t + periodMs
-function buildRegime(candles, periodMs) {
+// emaFast/emaSlow default to global constants; override via SYMBOL_CONFIG per-symbol fields.
+function buildRegime(candles, periodMs, emaFast = EMA_FAST, emaSlow = EMA_SLOW) {
   const closes   = candles.map(c => c.c);
-  const emaF     = calcEMA(closes, EMA_FAST);
-  const emaS     = calcEMA(closes, EMA_SLOW);
+  const emaF     = calcEMA(closes, emaFast);
+  const emaS     = calcEMA(closes, emaSlow);
   const crossMap = new Map();
   const stateMap = new Map();
 
@@ -757,7 +761,10 @@ async function processSymbol(symbol) {
     return;
   }
 
-  const { crossMap, stateMap } = buildRegime(regimeBarsForBuild, cfg.regime.ms);
+  const { crossMap, stateMap } = buildRegime(
+    regimeBarsForBuild, cfg.regime.ms,
+    cfg.emaFast ?? EMA_FAST, cfg.emaSlow ?? EMA_SLOW
+  );
 
   // ── On first run: detect current regime ──────────────────────────────────
   if (!state.initialized) {
@@ -830,7 +837,7 @@ async function processSymbol(symbol) {
       `🤖 <b>Craig Accum Bot — ${symbol}</b>\n` +
       `Initialized | Regime: ${state.regime.toUpperCase()}\n` +
       `Cash: $${state.cash.toFixed(2)} | Crypto: ${fQty(state.cryptoQty)}\n` +
-      `Exec: ${cfg.exec.label} | Regime TF: ${cfg.regime.label} EMA${EMA_FAST}/${EMA_SLOW}\n` +
+      `Exec: ${cfg.exec.label} | Regime TF: ${cfg.regime.label} EMA${cfg.emaFast ?? EMA_FAST}/${cfg.emaSlow ?? EMA_SLOW}\n` +
       (LIVE_TRADING ? `🔴 LIVE TRADING` : `📝 PAPER TRADING`)
     );
     return;
@@ -891,7 +898,7 @@ async function processSymbol(symbol) {
     }
 
     // ── 3. Regime change check ────────────────────────────────────────────────
-    // Checked at each regime-candle boundary (every 15m for BTC/ETH/AKT; every 30m for SOL/LINK; every 1h for PEPE)
+    // Checked at each regime-candle boundary (every 30m for BTC/ETH/SOL/LINK; every 15m for AKT; every 1h for PEPE)
     //
     // trendFollowing symbols (PEPE): golden cross → BUY (ride the pump), death cross → SELL (exit the dump)
     // contrarian symbols (all others): death cross → BUY (accumulate dip), golden cross → SELL (distribute rally)
@@ -2172,7 +2179,8 @@ async function main() {
     const c    = SYMBOL_CONFIG[sym];
     const buy  = (c.buyLadder  ?? BOS_SCALE_PCT_BUY).join(",");
     const sell = (c.sellLadder ?? BOS_SCALE_PCT_SELL).join(",");
-    console.log(`  ${sym.padEnd(9)}  exec: ${c.exec.label.padEnd(4)}  regime: ${c.regime.label.padEnd(4)}  EMA${EMA_FAST}/${EMA_SLOW}  buy:[${buy}]%  sell:[${sell}]%`);
+    const ef = c.emaFast ?? EMA_FAST, es = c.emaSlow ?? EMA_SLOW;
+    console.log(`  ${sym.padEnd(9)}  exec: ${c.exec.label.padEnd(4)}  regime: ${c.regime.label.padEnd(4)}  EMA${ef}/${es}  buy:[${buy}]%  sell:[${sell}]%`);
   }
   console.log(`  Buy (default) : [${BOS_SCALE_PCT_BUY.join(", ")}]%  │  Sell (default): [${BOS_SCALE_PCT_SELL.join(", ")}]%  │  UNLIMITED slots`);
   console.log(`  Reports : EOD at 23:55 UTC  (portfolio + analysis + news)`);
