@@ -3,7 +3,7 @@
 // craig-accumulation-bot.mjs  — Live Trading  (v2)
 //
 // STRATEGY (per-symbol timeframes):
-//   BTC-USDC  : 30m EMA50/200  regime  →  15m BOS-only execution
+//   BTC-USDC  : 30m EMA34/89   regime  →  15m BOS-only execution
 //   ETH-USDC  : 30m EMA20/200  regime  →   5m BOS-only execution
 //   SOL-USDC  : 30m EMA50/200  regime  →   5m BOS+CHOCH execution
 //   LINK-USDC : 30m EMA20/200  regime  →   5m BOS-only execution
@@ -145,6 +145,8 @@ const SYMBOL_CONFIG = {
   "BTC-USDC": {
     exec:      { gran: "FIFTEEN_MINUTE", secs:  900, bars: 250, label: "15m" },
     regime:    { gran: "THIRTY_MINUTE",  secs: 1800, bars: 600, ms: THIRTY_MIN_MS, label: "30m" },
+    emaFast:   34,                   // EMA34/89: +3.56pt avg α vs EMA50/200 (backtest-btc-combo.mjs)
+    emaSlow:   89,
     buyLadder:  [33, 33, 33],        // flat-33 — fewer bigger entries beat flat-15 DCA across all periods
     sellLadder: [10, 15, 25, 50],    // back-mid — hold most for the full rally, better than back-steep at 90/180d
     bosOnly:    true,                // BOS-only: no CHOCH trades (+3.5-4.2% at 90/180d vs BOS+CHOCH)

@@ -24,7 +24,7 @@ indicator("Craig Accum Bot - Signals", overlay=true, max_labels_count=500, max_l
 //     SOL / AKT / PEPE use BOS+CHOCH (bosOnly=false).
 //
 //   Timeframe guide (set chart TF + Regime TF input to match your symbol):
-//     BTC-USD      exec: 15m  regime: 30  EMA 50/200  BOS-only
+//     BTC-USD      exec: 15m  regime: 30  EMA 34/89   BOS-only
 //     ETH-USD      exec: 5m   regime: 30  EMA 20/200  BOS-only
 //     SOL-USD      exec: 5m   regime: 30  EMA 50/200  BOS+CHOCH
 //     LINK-USD     exec: 5m   regime: 30  EMA 20/200  BOS-only
