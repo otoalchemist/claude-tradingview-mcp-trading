@@ -51,6 +51,49 @@ function savePortfolioBaseline() {
   writeFileSync(PORTFOLIO_CFG_FILE, JSON.stringify({ baseline: PORTFOLIO_BASELINE }, null, 2));
 }
 
+// ── Pre-deploy backup ─────────────────────────────────────────────────────────
+// Called once at startup — snapshots every live state file + portfolio config
+// into *.backup.json files.  Since every Railway deploy restarts the process,
+// each deploy automatically creates a fresh backup.
+// Use /restore [sym|all] in Telegram to roll back to the pre-deploy snapshot.
+function backupStateFiles() {
+  let backed = 0;
+  for (const sym of SYMBOLS) {
+    const src = path.join(STATE_DIR, `craig-state-${sym}.json`);
+    const dst = path.join(STATE_DIR, `craig-state-${sym}.backup.json`);
+    try { if (existsSync(src)) { copyFileSync(src, dst); backed++; } } catch {}
+  }
+  // Also back up portfolio config
+  try {
+    if (existsSync(PORTFOLIO_CFG_FILE)) {
+      copyFileSync(PORTFOLIO_CFG_FILE, PORTFOLIO_CFG_FILE.replace(".json", ".backup.json"));
+    }
+  } catch {}
+  console.log(`[Backup] ${backed}/${SYMBOLS.length} state files backed up`);
+}
+
+function restoreStateFiles(targets) {
+  // targets: array of "SYM-USDC" strings, or all SYMBOLS
+  const results = [];
+  for (const sym of targets) {
+    const src = path.join(STATE_DIR, `craig-state-${sym}.backup.json`);
+    const dst = path.join(STATE_DIR, `craig-state-${sym}.json`);
+    try {
+      if (!existsSync(src)) { results.push(`⚠️ ${sym}: no backup found`); continue; }
+      copyFileSync(src, dst);
+      results.push(`✅ ${sym.replace("-USDC","")}: restored`);
+    } catch (e) { results.push(`❌ ${sym.replace("-USDC","")}: ${e.message}`); }
+  }
+  // Restore portfolio config if restoring all
+  if (targets.length === SYMBOLS.length) {
+    try {
+      const src = PORTFOLIO_CFG_FILE.replace(".json", ".backup.json");
+      if (existsSync(src)) { copyFileSync(src, PORTFOLIO_CFG_FILE); loadPortfolioBaseline(); }
+    } catch {}
+  }
+  return results;
+}
+
 // ── Instance identity + duplicate detection ───────────────────────────────────
 // Each process start gets a unique 4-byte hex ID so two running instances
 // can be told apart immediately in Telegram messages and /ping output.
@@ -273,6 +316,7 @@ async function registerBotCommands() {
     { command: "backup", description: "Snapshot all state + restore commands to Telegram" },
     { command: "pause",   description: "Pause trading for a symbol: /pause btc  or  /pause all" },
     { command: "resume",  description: "Resume trading for a symbol: /resume btc  or  /resume all" },
+    { command: "restore",           description: "Roll back to pre-deploy state snapshot: /restore all or /restore eth" },
     { command: "setbaseline",       description: "Update total portfolio baseline: /setbaseline 1400" },
     { command: "setcash",           description: "Add/correct cash balance: /setcash eth 200" },
     { command: "setregimecapital",  description: "Scale buy-ladder sizing: /setregimecapital eth 200 (run after setcash)" },
@@ -1732,6 +1776,7 @@ async function sendHelpMessage() {
     `/resume &lt;sym&gt;       — Resume trading for a symbol\n` +
     `/pause all           — Pause ALL symbols\n` +
     `/resume all          — Resume ALL symbols\n` +
+    `/restore [sym|all]           — Roll back state to pre-deploy snapshot (e.g. /restore all)\n` +
     `/setbaseline &lt;$&gt;             — Update total portfolio P&amp;L baseline (e.g. /setbaseline 1400)\n` +
     `/setcash &lt;sym&gt; &lt;$&gt;           — Add/correct cash balance\n` +
     `/setregimecapital &lt;sym&gt; &lt;$&gt;  — Scale up buy-ladder sizing (run after /setcash when adding capital)\n` +
@@ -1850,6 +1895,31 @@ async function startTelegramPoller() {
               `✅ Portfolio baseline updated: <b>$${old} → $${amount}</b>\n\n` +
               `P&amp;L% in /status and /report will now use $${amount} as the 100% baseline.\n` +
               `(Persisted — survives restarts)`
+            );
+          }
+        } else if (cmd === "/restore") {
+          // /restore [sym|all]  — rolls back to the pre-deploy backup snapshot
+          // e.g. /restore all  /restore eth  /restore btc
+          const arg = (rawText.trim().split(/\s+/)[1] || "").toUpperCase();
+          let targets;
+          if (!arg || arg === "ALL") {
+            targets = [...SYMBOLS];
+          } else {
+            const sym = arg.includes("-") ? arg : `${arg}-USDC`;
+            targets = SYMBOLS.includes(sym) ? [sym] : [];
+          }
+          if (!targets.length) {
+            await sendTelegram(
+              `❌ Usage: /restore all  or  /restore &lt;sym&gt;\nExample: <code>/restore all</code>  or  <code>/restore eth</code>\n\n` +
+              `Restores state from the backup snapshot taken at the last bot startup (deploy).`
+            );
+          } else {
+            const results = restoreStateFiles(targets);
+            const label = targets.length === SYMBOLS.length ? "ALL symbols" : targets.map(s=>s.replace("-USDC","")).join(", ");
+            await sendTelegram(
+              `🔄 <b>Restore — ${label}</b>\n\n` +
+              results.join("\n") + "\n\n" +
+              `State rolled back to pre-deploy snapshot.\nRun /status to verify.`
             );
           }
         } else if (cmd === "/setregimecapital") {
@@ -2117,6 +2187,7 @@ async function main() {
   // ── State directory + seed bootstrap ───────────────────────────────────────
   // Must run before any file reads so STATE_DIR exists and is populated.
   seedStateDir();
+  backupStateFiles();       // snapshot state before any migration logic runs
   loadPortfolioBaseline();  // override PORTFOLIO_BASELINE from persisted file if present
 
   // ── One-time state wipe (e.g. paper → live migration) ──────────────────────
