@@ -44,9 +44,12 @@ indicator("Craig Accum Bot - Signals", overlay=true, max_labels_count=500, max_l
 // =============================================================================
 
 // --- INPUTS ------------------------------------------------------------------
-i_regimeTF       = input.timeframe("30",   "Regime TF  (BTC/ETH/SOL/LINK=30 | AKT=15 | PEPE=60)")
-i_emaFast        = input.int(50,           "EMA Fast",            minval=1)
-i_emaSlow        = input.int(200,          "EMA Slow",            minval=1)
+i_regimeTF       = input.timeframe("30",   "Regime TF",
+     tooltip="BTC/ETH/SOL/LINK = 30  |  AKT = 15  |  PEPE = 60")
+i_emaFast        = input.int(50,           "EMA Fast",  minval=1, group="EMA Settings",
+     tooltip="Per-symbol fast EMA:\n  BTC  → 34\n  ETH  → 20\n  SOL  → 21\n  LINK → 20\n  PEPE → 50\n  AKT  → 21")
+i_emaSlow        = input.int(200,          "EMA Slow",  minval=1, group="EMA Settings",
+     tooltip="Per-symbol slow EMA:\n  BTC  →  89\n  ETH  → 200\n  SOL  →  55\n  LINK → 200\n  PEPE → 200\n  AKT  →  55")
 i_swingLB        = input.int(5,            "Swing Lookback",      minval=1)
 i_reqBOS         = input.bool(true,        "Require BOS before CHOCH")
 i_trendFollowing = input.bool(false,       "Trend-Following Mode  (PEPE: golden=BUY, death=SELL)", group="Strategy")
@@ -64,8 +67,8 @@ i_sym            = input.string("BTC", "Symbol (for ladder display)",
 regEmaF = request.security(syminfo.tickerid, i_regimeTF, ta.ema(close, i_emaFast)[1], lookahead=barmerge.lookahead_on)
 regEmaS = request.security(syminfo.tickerid, i_regimeTF, ta.ema(close, i_emaSlow)[1], lookahead=barmerge.lookahead_on)
 
-plot(i_showEMAs ? regEmaF : na, "EMA 50  (Regime TF)", color=color.new(color.orange, 0), linewidth=2)
-plot(i_showEMAs ? regEmaS : na, "EMA 200 (Regime TF)", color=color.new(color.blue,   0), linewidth=2)
+plot(i_showEMAs ? regEmaF : na, "EMA Fast (Regime TF)", color=color.new(color.orange, 0), linewidth=2)
+plot(i_showEMAs ? regEmaS : na, "EMA Slow (Regime TF)", color=color.new(color.blue,   0), linewidth=2)
 
 // --- REGIME STATE ------------------------------------------------------------
 goldenCross = regEmaF[1] <= regEmaS[1] and regEmaF > regEmaS
