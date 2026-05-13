@@ -39,6 +39,17 @@ import crypto from "crypto";
 const STATE_DIR  = (process.env.STATE_DIR ?? ".").replace(/\/+$/, "");
 const SEED_DIR   = path.join(path.dirname(new URL(import.meta.url).pathname), "data");
 const TRADES_LOG        = path.join(STATE_DIR, "craig-accum-trades.jsonl");
+const PORTFOLIO_CFG_FILE = path.join(STATE_DIR, "craig-portfolio-config.json");
+
+function loadPortfolioBaseline() {
+  try {
+    const cfg = JSON.parse(readFileSync(PORTFOLIO_CFG_FILE, "utf8"));
+    if (typeof cfg.baseline === "number" && cfg.baseline > 0) PORTFOLIO_BASELINE = cfg.baseline;
+  } catch { /* file absent → keep default */ }
+}
+function savePortfolioBaseline() {
+  writeFileSync(PORTFOLIO_CFG_FILE, JSON.stringify({ baseline: PORTFOLIO_BASELINE }, null, 2));
+}
 
 // ── Instance identity + duplicate detection ───────────────────────────────────
 // Each process start gets a unique 4-byte hex ID so two running instances
@@ -97,7 +108,7 @@ const FIFTEEN_MIN_MS =   900_000;
 // ── Config ────────────────────────────────────────────────────────────────────
 const SYMBOLS              = ["BTC-USDC", "ETH-USDC", "SOL-USDC", "LINK-USDC", "PEPE-USDC", "AKT-USDC"];
 const INITIAL_CAPITAL      = 100;
-const PORTFOLIO_BASELINE   = 1000;  // total $ deployed — update whenever capital is added/removed
+let   PORTFOLIO_BASELINE   = 1000;  // total $ deployed — updated via /setbaseline or persisted file
 const EMA_FAST             = 50;
 const EMA_SLOW             = 200;
 const SWING_LB             = 5;
@@ -262,6 +273,7 @@ async function registerBotCommands() {
     { command: "backup", description: "Snapshot all state + restore commands to Telegram" },
     { command: "pause",   description: "Pause trading for a symbol: /pause btc  or  /pause all" },
     { command: "resume",  description: "Resume trading for a symbol: /resume btc  or  /resume all" },
+    { command: "setbaseline",       description: "Update total portfolio baseline: /setbaseline 1400" },
     { command: "setcash",           description: "Add/correct cash balance: /setcash eth 200" },
     { command: "setregimecapital",  description: "Scale buy-ladder sizing: /setregimecapital eth 200 (run after setcash)" },
     { command: "setregimeqty",      description: "Fix sell baseline qty: /setregimeqty link 10.93" },
@@ -1499,7 +1511,7 @@ async function sendPing() {
     `Last scan : ${lastStr}\n` +
     `Next scan : ~${nextStr}\n` +
     `Symbols   : ${SYMBOLS.length}  [${SYMBOLS.map(s => s.replace("-USDC","")).join(" · ")}]\n` +
-    `Capital   : $${INITIAL_CAPITAL}/sym  ($${SYMBOLS.length * INITIAL_CAPITAL} total)\n` +
+    `Capital   : $${INITIAL_CAPITAL}/sym  ($${PORTFOLIO_BASELINE} baseline)\n` +
     `Regimes   : BTC=30m  ETH=15m  SOL/LINK=30m  PEPE=1h  AKT=15m\n` +
     `Buy scale : BTC=[${(SYMBOL_CONFIG["BTC-USDC"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  ETH=[${BOS_SCALE_PCT_BUY.join(",")}]%  SOL=[${(SYMBOL_CONFIG["SOL-USDC"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USDC"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USDC"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USDC"].buyLadder ?? BOS_SCALE_PCT_BUY).join(",")}]%\n` +
     `Sell scale: BTC=[${(SYMBOL_CONFIG["BTC-USDC"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  ETH/SOL=[${BOS_SCALE_PCT_SELL.join(",")}]%  LINK=[${(SYMBOL_CONFIG["LINK-USDC"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  PEPE=[${(SYMBOL_CONFIG["PEPE-USDC"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%  AKT=[${(SYMBOL_CONFIG["AKT-USDC"].sellLadder ?? BOS_SCALE_PCT_SELL).join(",")}]%\n` +
@@ -1559,7 +1571,7 @@ async function sendRegimeOverview() {
       lines.push(`${icon} ${name} [${reg}] $${val.toFixed(2)} (${pnlS})  ${detail}${pauseTag}`);
     } catch { lines.push(`❌ ${sym}  error`); }
   }
-  const totalStart = SYMBOLS.length * INITIAL_CAPITAL;
+  const totalStart = PORTFOLIO_BASELINE;
   const totalPnl   = ((totalVal - totalStart) / totalStart * 100);
   const t = `${ptTime(new Date(), true)} ${ptZone()}`;
   await sendTelegram(
@@ -1720,6 +1732,7 @@ async function sendHelpMessage() {
     `/resume &lt;sym&gt;       — Resume trading for a symbol\n` +
     `/pause all           — Pause ALL symbols\n` +
     `/resume all          — Resume ALL symbols\n` +
+    `/setbaseline &lt;$&gt;             — Update total portfolio P&amp;L baseline (e.g. /setbaseline 1400)\n` +
     `/setcash &lt;sym&gt; &lt;$&gt;           — Add/correct cash balance\n` +
     `/setregimecapital &lt;sym&gt; &lt;$&gt;  — Scale up buy-ladder sizing (run after /setcash when adding capital)\n` +
     `/setregimeqty &lt;sym&gt; &lt;qty&gt;    — Fix sell baseline qty (e.g. /setregimeqty link 10.93)\n` +
@@ -1817,6 +1830,27 @@ async function startTelegramPoller() {
             st.cash = amount;
             saveState(sym, st);
             await sendTelegram(`✅ <b>${sym}</b> cash updated: $${old} → $${amount.toFixed(2)}`);
+          }
+        } else if (cmd === "/setbaseline") {
+          // /setbaseline <amount>  e.g. /setbaseline 1400
+          // Updates the total portfolio baseline used for P&L% in /status and /report.
+          // Run this whenever you add or remove capital across all symbols.
+          const amount = parseFloat(rawText.trim().split(/\s+/)[1]);
+          if (isNaN(amount) || amount <= 0) {
+            await sendTelegram(
+              `❌ Usage: /setbaseline &lt;amount&gt;\nExample: <code>/setbaseline 1400</code>\n\n` +
+              `Sets the total deployed capital baseline used to calculate portfolio P&amp;L% in /status and /report.\n` +
+              `Current baseline: <b>$${PORTFOLIO_BASELINE}</b>`
+            );
+          } else {
+            const old = PORTFOLIO_BASELINE;
+            PORTFOLIO_BASELINE = amount;
+            savePortfolioBaseline();
+            await sendTelegram(
+              `✅ Portfolio baseline updated: <b>$${old} → $${amount}</b>\n\n` +
+              `P&amp;L% in /status and /report will now use $${amount} as the 100% baseline.\n` +
+              `(Persisted — survives restarts)`
+            );
           }
         } else if (cmd === "/setregimecapital") {
           // /setregimecapital <symbol> <amount>  e.g. /setregimecapital eth 200
@@ -2083,6 +2117,7 @@ async function main() {
   // ── State directory + seed bootstrap ───────────────────────────────────────
   // Must run before any file reads so STATE_DIR exists and is populated.
   seedStateDir();
+  loadPortfolioBaseline();  // override PORTFOLIO_BASELINE from persisted file if present
 
   // ── One-time state wipe (e.g. paper → live migration) ──────────────────────
   // Set RESET_STATE=true in Railway env vars, deploy once, then remove it.
