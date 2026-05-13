@@ -97,6 +97,7 @@ const FIFTEEN_MIN_MS =   900_000;
 // ── Config ────────────────────────────────────────────────────────────────────
 const SYMBOLS              = ["BTC-USDC", "ETH-USDC", "SOL-USDC", "LINK-USDC", "PEPE-USDC", "AKT-USDC"];
 const INITIAL_CAPITAL      = 100;
+const PORTFOLIO_BASELINE   = 1000;  // total $ deployed — update whenever capital is added/removed
 const EMA_FAST             = 50;
 const EMA_SLOW             = 200;
 const SWING_LB             = 5;
@@ -1317,7 +1318,7 @@ async function sendPortfolioReport() {
     }
   }
 
-  const totalStart  = SYMBOLS.length * INITIAL_CAPITAL;
+  const totalStart  = PORTFOLIO_BASELINE;
   const totalPnlPct = (totalPortVal - totalStart) / totalStart * 100;
   const totalSign   = totalPnlPct >= 0 ? "+" : "";
 
