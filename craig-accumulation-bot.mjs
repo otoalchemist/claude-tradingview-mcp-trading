@@ -5,7 +5,7 @@
 // STRATEGY (per-symbol timeframes):
 //   BTC-USDC  : 30m EMA34/89   regime  →  15m BOS-only execution
 //   ETH-USDC  : 30m EMA20/200  regime  →   5m BOS-only execution
-//   SOL-USDC  : 30m EMA50/200  regime  →   5m BOS+CHOCH execution
+//   SOL-USDC  : 30m EMA21/55   regime  →   5m BOS+CHOCH execution
 //   LINK-USDC : 30m EMA20/200  regime  →   5m BOS-only execution
 //   PEPE-USDC :  1h EMA50/200  regime  →   5m BOS+CHOCH execution  [TREND-FOLLOWING + BTC gate]
 //   AKT-USDC  : 15m EMA21/55   regime  →   5m BOS+CHOCH execution
@@ -216,6 +216,8 @@ const SYMBOL_CONFIG = {
   "SOL-USDC": {
     exec:  { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
     regime:{ gran: "THIRTY_MINUTE",  secs: 1800, bars: 600, ms: THIRTY_MIN_MS,  label: "30m" },
+    emaFast: 21,                     // EMA21/55: +5.48pt avg α vs 50/200 (backtest-sol-combo.mjs)
+    emaSlow: 55,
     buyLadder:  [60, 25, 10,  5],    // front-60 — deploy fast; +4.3% at 60d / +5.4% at 90d vs flat-15
   },
   "LINK-USDC": {

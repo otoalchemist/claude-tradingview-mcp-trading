@@ -26,7 +26,7 @@ indicator("Craig Accum Bot - Signals", overlay=true, max_labels_count=500, max_l
 //   Timeframe guide (set chart TF + Regime TF input to match your symbol):
 //     BTC-USD      exec: 15m  regime: 30  EMA 34/89   BOS-only
 //     ETH-USD      exec: 5m   regime: 30  EMA 20/200  BOS-only
-//     SOL-USD      exec: 5m   regime: 30  EMA 50/200  BOS+CHOCH
+//     SOL-USD      exec: 5m   regime: 30  EMA 21/55   BOS+CHOCH
 //     LINK-USD     exec: 5m   regime: 30  EMA 20/200  BOS-only
 //     PEPE-USD     exec: 5m   regime: 60  EMA 50/200  BOS+CHOCH  ← Trend-Following + CHOCH Gate
 //     AKT-USD      exec: 5m   regime: 15  EMA 21/55   BOS+CHOCH
