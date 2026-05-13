@@ -640,8 +640,10 @@ function makeFreshState(symbol) {
   const cfg = SYMBOL_CONFIG[symbol];
   return {
     symbol,
-    execGran:             cfg.exec.gran,   // detect timeframe migrations on restart
-    regimeGran:           cfg.regime.gran, // detect regime-TF migrations on restart
+    execGran:             cfg.exec.gran,         // detect timeframe migrations on restart
+    regimeGran:           cfg.regime.gran,        // detect regime-TF migrations on restart
+    emaFast:              cfg.emaFast ?? EMA_FAST, // detect EMA param changes on restart
+    emaSlow:              cfg.emaSlow ?? EMA_SLOW,
     initialized:          false,
     tradingPaused:        false,           // per-symbol pause via /pause command
     regime:               "neutral",
@@ -688,6 +690,25 @@ function loadState(symbol) {
       console.log(`[${symbol}] ${reason} — state reset (backup: ${backupPath})`);
       return makeFreshState(symbol);
     }
+    // Detect EMA param changes — force regime re-detection without wiping cash/position.
+    // Unlike exec/regime TF changes, we keep all trading state intact; only the regime
+    // label (buy/sell/neutral) may need to change to reflect the new EMA cross state.
+    {
+      const cfgEmaFast = cfg.emaFast ?? EMA_FAST;
+      const cfgEmaSlow = cfg.emaSlow ?? EMA_SLOW;
+      const storedEmaFast = state.emaFast ?? EMA_FAST;   // absent in older states → treated as global default
+      const storedEmaSlow = state.emaSlow ?? EMA_SLOW;
+      if (storedEmaFast !== cfgEmaFast || storedEmaSlow !== cfgEmaSlow) {
+        console.log(`[${symbol}] EMA params changed (${storedEmaFast}/${storedEmaSlow} → ${cfgEmaFast}/${cfgEmaSlow}) — will re-detect regime on next scan`);
+        state.initialized = false;   // triggers regime re-detection in scanSymbol without resetting cash/qty
+        state.emaFast     = cfgEmaFast;
+        state.emaSlow     = cfgEmaSlow;
+      } else {
+        state.emaFast = cfgEmaFast;
+        state.emaSlow = cfgEmaSlow;
+      }
+    }
+
     // Back-fill new fields for states saved before they were added
     if (!("lastPrice"            in state)) state.lastPrice            = 0;
     if (!("regimeStartPrice"     in state)) state.regimeStartPrice     = 0;
@@ -892,6 +913,8 @@ async function processSymbol(symbol) {
     state.lastPrice         = lastBar.c;
     state.lastProcessedBarT = lastBar.t;
     state.initialized       = true;
+    state.emaFast           = cfg.emaFast ?? EMA_FAST;  // persist so EMA param changes are detected on next start
+    state.emaSlow           = cfg.emaSlow ?? EMA_SLOW;
     saveState(symbol, state);
 
     const now = ptStr();
