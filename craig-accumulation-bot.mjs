@@ -507,7 +507,25 @@ async function executeBuy(symbol, usdAmount, bar) {
   if (!LIVE_TRADING) {
     return { price: bar.c, qty: usdAmount / bar.c, usd: usdAmount };
   }
-  const orderId = await placeLiveOrder(symbol, "BUY", usdAmount);
+  // Cap order at the actual available USDC balance to prevent "Insufficient balance" rejections.
+  // The bot's virtual state.cash can drift from the real balance (e.g. other symbols drew from
+  // the same account, or the user added/withdrew funds between scans).
+  let effectiveAmount = usdAmount;
+  try {
+    const { usdTotal } = await fetchCoinbasePosition(symbol);
+    if (usdTotal < usdAmount) {
+      const capped = Math.floor(usdTotal * 100) / 100;   // floor to 2dp — stay safely under
+      if (capped < MIN_ORDER_USD) {
+        throw new Error(`Insufficient USDC balance: available $${usdTotal.toFixed(2)}, need $${usdAmount.toFixed(2)}`);
+      }
+      console.warn(`[${symbol}] BUY capped: wanted $${usdAmount.toFixed(2)} but only $${usdTotal.toFixed(2)} USDC available → using $${capped.toFixed(2)}`);
+      effectiveAmount = capped;
+    }
+  } catch (e) {
+    if (e.message.startsWith("Insufficient USDC")) throw e;   // re-throw our own error
+    console.warn(`[${symbol}] Balance pre-check failed (${e.message}) — proceeding with original amount`);
+  }
+  const orderId = await placeLiveOrder(symbol, "BUY", effectiveAmount);
   const order   = await waitForFill(orderId);
   return {
     price: parseFloat(order.average_filled_price),
