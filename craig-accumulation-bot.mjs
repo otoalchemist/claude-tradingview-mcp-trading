@@ -1303,14 +1303,11 @@ function buildSymbolReport(symbol) {
   const cfg       = SYMBOL_CONFIG[symbol];
   const price     = s.lastPrice || 0;
   const portVal   = s.cash + s.cryptoQty * price;
-  // P&L baseline: for inherited positions (preExistingCryptoQty > 0, e.g. LINK set via
-  // /setregimeqty), the bot's capital allocation is simply INITIAL_CAPITAL — the crypto was
-  // already on the exchange and was never purchased out of the bot's $100 cash.
-  // For all other symbols, use regimeStartCapital (portfolio value recorded at regime start).
-  // Fall back to INITIAL_CAPITAL for old states that never set regimeStartCapital.
-  const pnlBaseline = (s.preExistingCryptoQty > 0)
-    ? INITIAL_CAPITAL
-    : (s.regimeStartCapital || INITIAL_CAPITAL);
+  // P&L baseline: always use regimeStartCapital (set at regime start, re-init, or /setcash).
+  // Do NOT special-case preExistingCryptoQty — in live mode re-inits set preExistingCryptoQty
+  // for any held balance, which would otherwise hardcode the baseline to $100 even when the
+  // user has deployed $200+.  regimeStartCapital is now reliably set in all paths.
+  const pnlBaseline = s.regimeStartCapital || INITIAL_CAPITAL;
   const pnlPct    = ((portVal - pnlBaseline) / pnlBaseline * 100);
   const pnlSign   = pnlPct >= 0 ? "+" : "";
 
@@ -1473,7 +1470,7 @@ async function sendPortfolioReport() {
 
     const price    = s.lastPrice || 0;
     const portVal  = s.cash + s.cryptoQty * price;
-    const baseline = s.preExistingCryptoQty > 0 ? INITIAL_CAPITAL : (s.regimeStartCapital || INITIAL_CAPITAL);
+    const baseline = s.regimeStartCapital || INITIAL_CAPITAL;
     const pnlPct   = (portVal - baseline) / baseline * 100;
 
     let hodlPct = null;
@@ -1636,9 +1633,7 @@ async function sendRegimeOverview() {
       const icon  = s.regime === "buy" ? "☠️" : s.regime === "sell" ? "⭐" : "⏸ ";
       const name  = sym.replace("-USDC","").padEnd(5);
       const reg   = s.regime.toUpperCase().padEnd(7);
-      const ovBaseline = (s.preExistingCryptoQty > 0)
-        ? INITIAL_CAPITAL
-        : (s.regimeStartCapital || INITIAL_CAPITAL);
+      const ovBaseline = s.regimeStartCapital || INITIAL_CAPITAL;
       const pnl   = ((val - ovBaseline) / ovBaseline * 100);
       const pnlS  = (pnl >= 0 ? "+" : "") + pnl.toFixed(2) + "%";
       let detail  = "";
