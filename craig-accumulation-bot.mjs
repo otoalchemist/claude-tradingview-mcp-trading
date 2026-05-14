@@ -1914,19 +1914,21 @@ async function startTelegramPoller() {
             const oldCash = st.cash;
             const oldRSC  = st.regimeStartCapital;
             st.cash = amount;
-            // Recalculate regimeStartCapital as new total portfolio value (cash + crypto at last price).
-            // This prevents the bot from treating added capital as a P&L gain.
-            const cryptoValue = (st.cryptoQty ?? 0) * (st.lastPrice || 0);
-            const newRSC = amount + cryptoValue;
-            st.regimeStartCapital = newRSC;
+            // When ADDING capital (new > old): raise regimeStartCapital by the same delta so the
+            // added funds don't show as a P&L gain.
+            // When CORRECTING cash downward (e.g. reflecting a manual buy already made): do NOT
+            // touch regimeStartCapital — it already accounts for the full deployed capital.
+            let newRSC = oldRSC;
+            let rscNote = "";
+            if (amount > oldCash) {
+              const delta = amount - oldCash;
+              newRSC = oldRSC + delta;
+              st.regimeStartCapital = newRSC;
+              rscNote = `\nregimeStartCapital: $${oldRSC.toFixed(2)} → $${newRSC.toFixed(2)} (+$${delta.toFixed(2)} added capital)`;
+            }
             saveState(sym, st);
-            const cryptoNote = cryptoValue > 0
-              ? `\nCrypto held: ${fQty(st.cryptoQty)} @ $${fPrice(st.lastPrice)} = $${cryptoValue.toFixed(2)}`
-              : "";
             await sendTelegram(
-              `✅ <b>${sym}</b> cash: $${oldCash.toFixed(2)} → $${amount.toFixed(2)}${cryptoNote}\n` +
-              `regimeStartCapital: $${oldRSC.toFixed(2)} → $${newRSC.toFixed(2)}\n` +
-              `P&amp;L baseline reset to $${newRSC.toFixed(2)} (no false gains from added capital)`
+              `✅ <b>${sym}</b> cash: $${oldCash.toFixed(2)} → $${amount.toFixed(2)}${rscNote}`
             );
           }
         } else if (cmd === "/setbaseline") {
