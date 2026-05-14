@@ -1905,19 +1905,34 @@ async function startTelegramPoller() {
             runCycle(true).catch(e => sendTelegram(`❌ Scan error: ${e.message}`));
           }
         } else if (cmd === "/setcash") {
-          // /setcash <symbol> <amount>  e.g. /setcash link 0
+          // /setcash <symbol> <amount>  e.g. /setcash eth 200
+          // Also resets regimeStartCapital to new total portfolio value so P&L doesn't
+          // show a false gain from the added capital.
           const parts = rawText.trim().split(/\s+/);
           const symRaw = (parts[1] || "").toUpperCase();
           const sym = symRaw.includes("-") ? symRaw : `${symRaw}-USDC`;
           const amount = parseFloat(parts[2]);
           if (!SYMBOL_CONFIG[sym] || isNaN(amount) || amount < 0) {
-            await sendTelegram(`❌ Usage: /setcash &lt;symbol&gt; &lt;amount&gt;\nExample: <code>/setcash LINK 0</code>`);
+            await sendTelegram(`❌ Usage: /setcash &lt;symbol&gt; &lt;amount&gt;\nExample: <code>/setcash ETH 200</code>`);
           } else {
             const st = loadState(sym);
-            const old = st.cash.toFixed(2);
+            const oldCash = st.cash;
+            const oldRSC  = st.regimeStartCapital;
             st.cash = amount;
+            // Recalculate regimeStartCapital as new total portfolio value (cash + crypto at last price).
+            // This prevents the bot from treating added capital as a P&L gain.
+            const cryptoValue = (st.cryptoQty ?? 0) * (st.lastPrice || 0);
+            const newRSC = amount + cryptoValue;
+            st.regimeStartCapital = newRSC;
             saveState(sym, st);
-            await sendTelegram(`✅ <b>${sym}</b> cash updated: $${old} → $${amount.toFixed(2)}`);
+            const cryptoNote = cryptoValue > 0
+              ? `\nCrypto held: ${fQty(st.cryptoQty)} @ $${fPrice(st.lastPrice)} = $${cryptoValue.toFixed(2)}`
+              : "";
+            await sendTelegram(
+              `✅ <b>${sym}</b> cash: $${oldCash.toFixed(2)} → $${amount.toFixed(2)}${cryptoNote}\n` +
+              `regimeStartCapital: $${oldRSC.toFixed(2)} → $${newRSC.toFixed(2)}\n` +
+              `P&amp;L baseline reset to $${newRSC.toFixed(2)} (no false gains from added capital)`
+            );
           }
         } else if (cmd === "/setbaseline") {
           // /setbaseline <amount>  e.g. /setbaseline 1400
