@@ -242,14 +242,15 @@ const SYMBOL_CONFIG = {
     btcGate:        true,              // only buy when BTC EMA50 > EMA200 (crypto bull market)
     useChochGate:   true,             // gate-closed: pause BOS until aligned CHOCH fires
   },
-  // AKT: EMA21/55 → +41.83pt avg α vs EMA50/200 (backtest-all-v2.mjs r1)
+  // AKT: EMA13/48 → +13.85pt avg α vs EMA21/55 (backtest-akt-combo.mjs)
+  //               AKT cycles are short & violent — faster EMA catches entries/exits sooner
   //      buy=aggressive-front-80 (+4.67pt, backtest-all-v2.mjs r2) — deploy immediately; AKT moves fast
   //      sell=flat-33 (+5.44pt, backtest-all-v2.mjs r2) — hold for full 180d run vs front-50
   "AKT-USDC": {
     exec:    { gran: "FIVE_MINUTE",    secs:  300, bars: 300, label: "5m"  },
     regime:  { gran: "FIFTEEN_MINUTE", secs:  900, bars: 600, ms: FIFTEEN_MIN_MS, label: "15m" },
-    emaFast: 21,                    // EMA21/55: +41.83pt avg α vs 50/200 (backtest-all-v2.mjs r1)
-    emaSlow: 55,
+    emaFast: 13,                    // EMA13/48: +13.85pt avg α vs EMA21/55 (backtest-akt-combo.mjs)
+    emaSlow: 48,
     buyLadder:  [80, 10,  5,  5],  // aggressive-front-80: +4.67pt avg α vs front-60 (backtest-all-v2.mjs r2)
     sellLadder: [33, 33, 33, 33],  // flat-33: +5.44pt avg α vs front-50 (backtest-all-v2.mjs r2)
   },

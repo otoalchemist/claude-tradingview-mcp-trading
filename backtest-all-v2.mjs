@@ -250,7 +250,7 @@ const BASELINES = {
   "SOL-USD": { regimeMs:1800_000, emaFast:21, emaSlow:55,  swingLb:5, bosOnly:false, trendFollowing:false, btcGate:false, useChochGate:false, buyLadder:[60,25,10,5],  sellLadder:[5,10,20,40],  execSec:300,  regSec:1800, label:"SOL" },
   "LINK-USD":{ regimeMs:1800_000, emaFast:20, emaSlow:200, swingLb:5, bosOnly:true,  trendFollowing:false, btcGate:false, useChochGate:false, buyLadder:[60,25,10,5],  sellLadder:[33,33,33,33], execSec:300,  regSec:1800, label:"LINK"},
   "PEPE-USD":{ regimeMs:3600_000, emaFast:50, emaSlow:200, swingLb:5, bosOnly:false, trendFollowing:true,  btcGate:true,  useChochGate:true,  buyLadder:[60,25,10,5],  sellLadder:[5,10,20,40],  execSec:300,  regSec:3600, label:"PEPE"},
-  "AKT-USD": { regimeMs: 900_000, emaFast:21, emaSlow:55,  swingLb:5, bosOnly:false, trendFollowing:false, btcGate:false, useChochGate:false, buyLadder:[80,10,5,5],   sellLadder:[33,33,33,33], execSec:300,  regSec:900,  label:"AKT" },
+  "AKT-USD": { regimeMs: 900_000, emaFast:13, emaSlow:48,  swingLb:5, bosOnly:false, trendFollowing:false, btcGate:false, useChochGate:false, buyLadder:[80,10,5,5],   sellLadder:[33,33,33,33], execSec:300,  regSec:900,  label:"AKT" },
 };
 
 const SYMBOLS = Object.keys(BASELINES);

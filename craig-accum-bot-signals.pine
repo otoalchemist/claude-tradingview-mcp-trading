@@ -29,7 +29,7 @@ indicator("Craig Accum Bot - Signals", overlay=true, max_labels_count=500, max_l
 //     SOL-USD      exec: 5m   regime: 30  EMA 21/55   BOS+CHOCH
 //     LINK-USD     exec: 5m   regime: 30  EMA 20/200  BOS-only
 //     PEPE-USD     exec: 5m   regime: 60  EMA 50/200  BOS+CHOCH  ← Trend-Following + CHOCH Gate
-//     AKT-USD      exec: 5m   regime: 15  EMA 21/55   BOS+CHOCH
+//     AKT-USD      exec: 5m   regime: 15  EMA 13/48   BOS+CHOCH
 //
 //   Ladder reference (matches SYMBOL_CONFIG in craig-accumulation-bot.mjs):
 //     BTC          buy: 33·33·33      sell: 10·15·25·50  (flat-33 / back-mid)
@@ -47,9 +47,9 @@ indicator("Craig Accum Bot - Signals", overlay=true, max_labels_count=500, max_l
 i_regimeTF       = input.timeframe("30",   "Regime TF",
      tooltip="BTC/ETH/SOL/LINK = 30  |  AKT = 15  |  PEPE = 60")
 i_emaFast        = input.int(50,           "EMA Fast",  minval=1, group="EMA Settings",
-     tooltip="Per-symbol fast EMA:\n  BTC  → 34\n  ETH  → 20\n  SOL  → 21\n  LINK → 20\n  PEPE → 50\n  AKT  → 21")
+     tooltip="Per-symbol fast EMA:\n  BTC  → 34\n  ETH  → 20\n  SOL  → 21\n  LINK → 20\n  PEPE → 50\n  AKT  → 13")
 i_emaSlow        = input.int(200,          "EMA Slow",  minval=1, group="EMA Settings",
-     tooltip="Per-symbol slow EMA:\n  BTC  →  89\n  ETH  → 200\n  SOL  →  55\n  LINK → 200\n  PEPE → 200\n  AKT  →  55")
+     tooltip="Per-symbol slow EMA:\n  BTC  →  89\n  ETH  → 200\n  SOL  →  55\n  LINK → 200\n  PEPE → 200\n  AKT  →  48")
 i_swingLB        = input.int(5,            "Swing Lookback",      minval=1)
 i_reqBOS         = input.bool(true,        "Require BOS before CHOCH")
 i_trendFollowing = input.bool(false,       "Trend-Following Mode  (PEPE: golden=BUY, death=SELL)", group="Strategy")
